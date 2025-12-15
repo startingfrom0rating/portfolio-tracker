@@ -5,6 +5,11 @@ import re
 import os
 
 class PortfolioEngine:
+    # Constants
+    INITIAL_CAPITAL = 500000.0
+    TOTAL_COMMISSIONS = 985.00  # Total commissions paid
+    INCEPTION_DATE = pd.Timestamp('2025-09-28')
+    
     def __init__(self, transaction_file, open_position_file=None):
         self.transaction_file = transaction_file
         self.open_position_file = open_position_file
@@ -13,11 +18,15 @@ class PortfolioEngine:
         self.holdings = {} # {ticker: quantity}
         self.avg_costs = {} # {ticker: avg_cost_per_share_usd}
         self.cost_basis = {} # {ticker: total_invested_usd}
-        self.cash_balance = 500000.0
+        self.cash_balance = self.INITIAL_CAPITAL
         self.market_data = {}
         self.fallback_prices = {} # {symbol: price (USD)}
         self.errors = []
+        self.total_dividends = 0.0  # Track total dividends received
+        self.dividend_by_ticker = {}  # {ticker: total_dividends_usd}
         self.FORCE_FALLBACK = ['HWC.L', 'HWC', 'B-T-6.250-15052030']
+        self._history_cache = None  # Cache for history data
+        self._sp500_cache = None  # Cache for S&P 500 data
 
     def clean_currency(self, val):
         """Removes currency symbols and converts to float."""
@@ -109,8 +118,22 @@ class PortfolioEngine:
         # Amount in CSV is negative for buys, positive for sells/divs (usually)
         # We assume Amount column is already in USD based on analysis of JPY/CAD rows.
         total_cash_flow = self.transactions['Amount'].sum()
-        total_cash_flow = self.transactions['Amount'].sum()
-        self.cash_balance = 500000.0 + total_cash_flow
+        self.cash_balance = self.INITIAL_CAPITAL + total_cash_flow
+
+        # Commissions are not represented in the CSV cash flows (user-provided total).
+        # Treat them as an additional cash outflow so total value and returns are net.
+        self.cash_balance -= float(self.TOTAL_COMMISSIONS)
+        
+        # Track dividends
+        self.total_dividends = 0.0
+        self.dividend_by_ticker = {}
+        for _, row in self.transactions.iterrows():
+            txn_type = str(row['TransactionType']).lower()
+            if 'dividend' in txn_type or 'distribution' in txn_type:
+                amt = row['Amount']
+                ticker = row['YF_Ticker']
+                self.total_dividends += amt
+                self.dividend_by_ticker[ticker] = self.dividend_by_ticker.get(ticker, 0.0) + amt
         
         # Calculate Cost Basis
         self._calculate_cost_basis()
@@ -370,11 +393,11 @@ class PortfolioEngine:
         # Columns = Tickers, Index = Date
         tickers = list(set(df_txn['YF_Ticker'].unique()))
         holdings_df = pd.DataFrame(0.0, index=date_range, columns=tickers)
-        cash_series = pd.Series(500000.0, index=date_range)
+        cash_series = pd.Series(self.INITIAL_CAPITAL - float(self.TOTAL_COMMISSIONS), index=date_range)
         
         # Running state
         current_holdings = {t: 0.0 for t in tickers}
-        current_cash = 500000.0
+        current_cash = self.INITIAL_CAPITAL - float(self.TOTAL_COMMISSIONS)
         
         # Iterate days? Or allow vectorization?
         # Vectorization is valid but logic is complex with intraday multiple txn.
@@ -391,7 +414,7 @@ class PortfolioEngine:
         cum_cash = pd.Series(0.0, index=date_range)
         
         running_h = pd.Series(0.0, index=tickers)
-        running_c = 500000.0
+        running_c = self.INITIAL_CAPITAL - float(self.TOTAL_COMMISSIONS)
         
         for d in date_range:
             day = d.date()
@@ -415,10 +438,32 @@ class PortfolioEngine:
             cum_cash.loc[d] = running_c
             
         # 2. Fetch Historical Prices
-        # We need prices for all tickers for the date range
-        # yfinance download
+        # We need prices for all tickers for the date range.
+        # Some symbols (e.g., bonds/custom IDs) are not downloadable from yfinance.
+        # We'll skip those and fill using fallback prices.
         try:
-            prices = yf.download(tickers, start=start_date, end=end_date + pd.Timedelta(days=1), progress=False)['Close']
+            def _yf_downloadable(tk: str) -> bool:
+                if tk in self.FORCE_FALLBACK:
+                    return False
+                # Heuristic: bond-like / internal identifiers that yfinance can't resolve.
+                if tk.startswith('B-') or tk.count('-') >= 2:
+                    return False
+                return True
+
+            yf_tickers = [t for t in tickers if _yf_downloadable(t)]
+            if yf_tickers:
+                prices = yf.download(
+                    yf_tickers,
+                    start=start_date,
+                    end=end_date + pd.Timedelta(days=1),
+                    progress=False,
+                )['Close']
+                if isinstance(prices, pd.Series):
+                    # Single-ticker path
+                    prices = prices.to_frame(name=yf_tickers[0])
+            else:
+                prices = pd.DataFrame(index=pd.date_range(start_date, end_date))
+
             # Forward fill missing prices (holidays/weekends)
             prices = prices.reindex(date_range).ffill().bfill()
             
@@ -526,6 +571,313 @@ class PortfolioEngine:
                 history_df[ticker] = val.fillna(0.0)
                 
         return history_df
+
+    def get_sp500_history(self, start_date=None, end_date=None):
+        """Fetch benchmark history using SPY (S&P 500 ETF) as the reference."""
+        if start_date is None:
+            start_date = self.INCEPTION_DATE
+        if end_date is None:
+            end_date = pd.Timestamp.now()
+
+        # Best-effort cache to reduce repeated yfinance calls on Streamlit reruns.
+        cache = getattr(self, '_sp500_cache', None)
+        if cache:
+            try:
+                cached_series, cached_start, cached_end = cache
+                if cached_start <= pd.Timestamp(start_date).normalize() and cached_end >= pd.Timestamp(end_date).normalize():
+                    sl = cached_series.loc[pd.Timestamp(start_date).normalize():pd.Timestamp(end_date).normalize()]
+                    if not sl.empty:
+                        return sl
+            except Exception:
+                pass
+        
+        try:
+            # Use SPY as a liquid proxy for S&P 500 growth.
+            raw = yf.download(
+                'SPY',
+                start=start_date,
+                end=end_date + pd.Timedelta(days=1),
+                progress=False,
+            )
+            
+            # Handle various yfinance return formats robustly
+            sp500 = pd.Series(dtype=float)
+            
+            if isinstance(raw, pd.DataFrame):
+                # yfinance may return MultiIndex columns like ('Close', 'SPY')
+                if isinstance(raw.columns, pd.MultiIndex):
+                    # Flatten and find Close
+                    if 'Close' in raw.columns.get_level_values(0):
+                        sp500 = raw['Close'].iloc[:, 0] if isinstance(raw['Close'], pd.DataFrame) else raw['Close']
+                    elif 'Adj Close' in raw.columns.get_level_values(0):
+                        sp500 = raw['Adj Close'].iloc[:, 0] if isinstance(raw['Adj Close'], pd.DataFrame) else raw['Adj Close']
+                else:
+                    # Normal columns
+                    if 'Close' in raw.columns:
+                        sp500 = raw['Close']
+                    elif 'Adj Close' in raw.columns:
+                        sp500 = raw['Adj Close']
+            
+            # Ensure it's a Series
+            if isinstance(sp500, pd.DataFrame):
+                sp500 = sp500.iloc[:, 0]
+            
+            # Normalize index to midnight for alignment with our daily history index
+            if not sp500.empty:
+                sp500.index = pd.to_datetime(sp500.index).normalize()
+
+            try:
+                self._sp500_cache = (sp500, sp500.index.min(), sp500.index.max())
+            except Exception:
+                pass
+            return sp500
+        except Exception as e:
+            print(f"Error fetching SPY benchmark: {e}")
+            return pd.Series()
+
+    def get_timeframe_returns(self):
+        """Calculate returns over multiple timeframes with commission adjustment."""
+        history = self.get_history(breakdown=True)
+        if history.empty:
+            return {}
+        
+        today = pd.Timestamp.now().normalize()
+        
+        # Find the latest available date in history
+        latest_date = history.index.max()
+        current_value = history['Total'].iloc[-1]
+        
+        # Current total value is already net of commissions because we deduct commissions from cash.
+        net_current = current_value
+        
+        # Define timeframes
+        timeframes = {
+            '1D': today - pd.Timedelta(days=1),
+            '1W': today - pd.Timedelta(weeks=1),
+            '1M': today - pd.DateOffset(months=1),
+            'YTD': pd.Timestamp(f'{today.year}-01-01'),
+            'Since Sep 28': self.INCEPTION_DATE,
+            'Inception': history.index.min()
+        }
+        
+        results = {}
+        for label, start_dt in timeframes.items():
+            # Find closest available date
+            mask = history.index >= start_dt
+            if mask.any():
+                start_idx = history.index[mask].min()
+                start_value = history.loc[start_idx, 'Total']
+                
+                # For inception, use initial capital
+                if label == 'Inception':
+                    start_value = self.INITIAL_CAPITAL
+                
+                abs_return = net_current - start_value
+                pct_return = ((net_current / start_value) - 1) * 100 if start_value > 0 else 0
+                
+                results[label] = {
+                    'start_value': start_value,
+                    'end_value': net_current,
+                    'absolute': abs_return,
+                    'percent': pct_return,
+                    'start_date': start_idx
+                }
+        
+        # Provide a dedicated net-return summary (commissions already reflected in value).
+        if 'Inception' in results:
+            results['Inception_Net'] = {
+                'absolute': results['Inception']['absolute'],
+                'percent': results['Inception']['percent'],
+                'commissions': float(self.TOTAL_COMMISSIONS),
+                'dividends': float(self.total_dividends),
+            }
+        
+        return results
+
+    def get_benchmark_comparison(self):
+        """Compare portfolio performance vs SPY since Sep 28, 2025."""
+        history = self.get_history(breakdown=True)
+        if history.empty:
+            return {}
+        
+        sp500 = self.get_sp500_history(start_date=self.INCEPTION_DATE)
+        if sp500 is None or getattr(sp500, 'empty', True):
+            return {'error': 'Could not fetch S&P 500 data'}
+
+        # Align on normalized daily dates and since inception date
+        start_dt = self.INCEPTION_DATE.normalize()
+        hist_slice = history[history.index >= start_dt]
+        sp_slice = sp500[sp500.index >= start_dt]
+
+        common_dates = hist_slice.index.intersection(sp_slice.index)
+        if len(common_dates) < 2:
+            return {'error': 'Insufficient overlapping dates for comparison'}
+
+        start_date = common_dates[0]
+        end_date = common_dates[-1]
+
+        port_start = float(hist_slice.loc[start_date, 'Total'])
+        port_end = float(hist_slice.loc[end_date, 'Total'])
+        port_return = ((port_end / port_start) - 1) * 100 if port_start else 0.0
+
+        sp_start = float(sp_slice.loc[start_date])
+        sp_end = float(sp_slice.loc[end_date])
+        sp_return = ((sp_end / sp_start) - 1) * 100 if sp_start else 0.0
+
+        excess_return = port_return - sp_return
+
+        return {
+            'portfolio_return': float(port_return),
+            'sp500_return': float(sp_return),
+            'excess_return': float(excess_return),
+            'portfolio_start': float(port_start),
+            'portfolio_end': float(port_end),
+            'sp500_start': float(sp_start),
+            'sp500_end': float(sp_end),
+            'start_date': start_date,
+            'end_date': end_date
+        }
+
+    def get_daily_attribution(self):
+        """Identify which equities drove portfolio performance for the last trading day."""
+        history = self.get_history(breakdown=True)
+        if history.empty or len(history) < 2:
+            return {'total_change': 0, 'contributors': []}
+        
+        # Get last two days
+        today_vals = history.iloc[-1]
+        yesterday_vals = history.iloc[-2]
+        
+        contributors = []
+        total_change = today_vals['Total'] - yesterday_vals['Total']
+        
+        for col in history.columns:
+            if col not in ['Total', 'Cash']:
+                change = today_vals[col] - yesterday_vals[col]
+                if abs(change) > 0.01:  # Filter noise
+                    pct_contrib = (change / abs(total_change) * 100) if total_change != 0 else 0
+                    contributors.append({
+                        'ticker': col,
+                        'change_usd': change,
+                        'contribution_pct': pct_contrib,
+                        'prev_value': yesterday_vals[col],
+                        'curr_value': today_vals[col]
+                    })
+        
+        # Sort by absolute contribution
+        contributors.sort(key=lambda x: abs(x['change_usd']), reverse=True)
+        
+        return {
+            'date': history.index[-1],
+            'total_change': total_change,
+            'total_change_pct': (total_change / yesterday_vals['Total']) * 100 if yesterday_vals['Total'] > 0 else 0,
+            'contributors': contributors[:10]  # Top 10
+        }
+
+    def get_weekly_attribution(self):
+        """Identify which equities drove portfolio performance for the last trading week."""
+        history = self.get_history(breakdown=True)
+        if history.empty:
+            return {'total_change': 0, 'contributors': []}
+        
+        # Get data from ~7 days ago
+        today = history.index.max()
+        week_ago = today - pd.Timedelta(days=7)
+        
+        # Find closest date
+        mask = history.index <= week_ago
+        if not mask.any():
+            week_start_idx = 0
+        else:
+            week_start_idx = history.index.get_loc(history.index[mask].max())
+        
+        today_vals = history.iloc[-1]
+        week_ago_vals = history.iloc[week_start_idx]
+        
+        contributors = []
+        total_change = today_vals['Total'] - week_ago_vals['Total']
+        
+        for col in history.columns:
+            if col not in ['Total', 'Cash']:
+                change = today_vals[col] - week_ago_vals[col]
+                if abs(change) > 0.01:
+                    pct_contrib = (change / abs(total_change) * 100) if total_change != 0 else 0
+                    contributors.append({
+                        'ticker': col,
+                        'change_usd': change,
+                        'contribution_pct': pct_contrib,
+                        'prev_value': week_ago_vals[col],
+                        'curr_value': today_vals[col]
+                    })
+        
+        contributors.sort(key=lambda x: abs(x['change_usd']), reverse=True)
+        
+        return {
+            'start_date': history.index[week_start_idx],
+            'end_date': today,
+            'total_change': total_change,
+            'total_change_pct': (total_change / week_ago_vals['Total']) * 100 if week_ago_vals['Total'] > 0 else 0,
+            'contributors': contributors[:10]
+        }
+
+    def get_holdings_detail(self):
+        """Get detailed holdings with daily change and portfolio weight."""
+        valuations = self.get_valuations()
+        positions = valuations['positions'].copy()
+        total_value = valuations['total_value']
+        
+        history = self.get_history(breakdown=True)
+        
+        if not positions.empty and not history.empty and len(history) >= 2:
+            # Calculate daily change for each position
+            today_vals = history.iloc[-1]
+            yesterday_vals = history.iloc[-2]
+            
+            daily_changes = []
+            daily_change_pcts = []
+            weights = []
+            
+            for _, row in positions.iterrows():
+                ticker = row['Ticker']
+                curr_val = row['Market Value (USD)']
+                
+                # Portfolio weight
+                weight = (curr_val / total_value * 100) if total_value > 0 else 0
+                weights.append(weight)
+                
+                # Daily change
+                if ticker in history.columns:
+                    prev_val = yesterday_vals.get(ticker, curr_val)
+                    change = curr_val - prev_val
+                    change_pct = (change / prev_val * 100) if prev_val > 0 else 0
+                else:
+                    change = 0
+                    change_pct = 0
+                
+                daily_changes.append(change)
+                daily_change_pcts.append(change_pct)
+            
+            positions['Daily Change ($)'] = daily_changes
+            positions['Daily Change (%)'] = daily_change_pcts
+            positions['Weight (%)'] = weights
+            
+            # Add dividend info
+            positions['Dividends Received'] = positions['Ticker'].map(
+                lambda x: self.dividend_by_ticker.get(x, 0.0)
+            )
+        
+        return positions
+
+    def fetch_stock_news(self, ticker, limit=3):
+        """Fetch recent news for a ticker (best effort)."""
+        try:
+            stock = yf.Ticker(ticker)
+            news = stock.news
+            if news:
+                return [{'title': n.get('title', ''), 'link': n.get('link', '')} for n in news[:limit]]
+        except Exception:
+            pass
+        return []
 
 if __name__ == "__main__":
     # Test run
