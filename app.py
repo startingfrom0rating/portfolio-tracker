@@ -6,6 +6,12 @@ import plotly.graph_objects as go
 import os
 from portfolio_engine import PortfolioEngine
 
+try:
+    # Optional: used to auto-refresh the app without blocking.
+    from streamlit_autorefresh import st_autorefresh  # type: ignore
+except Exception:  # pragma: no cover
+    st_autorefresh = None
+
 # Set Page Config
 st.set_page_config(
     page_title="Portfolio Valuation",
@@ -36,6 +42,11 @@ def load_engine():
     return eng
 
 def main():
+    # Auto-refresh (best effort). If the optional dependency isn't installed,
+    # the app still works; it just won't auto-refresh.
+    if st_autorefresh is not None:
+        st_autorefresh(interval=3 * 60 * 1000, key="portfolio_autorefresh")
+
     st.title("📈 Portfolio Tracker & Valuation")
     
     # Load Engine
@@ -44,6 +55,13 @@ def main():
 
     if not engine:
         return
+
+    # Refresh prices each run so the UI stays current (auto-refresh will trigger reruns).
+    # If this fails (e.g., temporary network issue), keep the last known prices.
+    try:
+        engine.fetch_market_data()
+    except Exception as e:
+        st.warning(f"Price refresh failed; showing last known prices. ({e})")
 
     # Get Valuations
     valuation_data = engine.get_valuations()
@@ -152,12 +170,26 @@ def main():
             }
             
             # Pandas Styler
-            st.dataframe(
-                display_df.style.format(format_dict)
-                .background_gradient(subset=['Unrealized PnL'], cmap="RdBu", vmin=-5000, vmax=5000),
-                use_container_width=True,
-                height=800
-            )
+            # NOTE: Styler.background_gradient requires matplotlib; Streamlit Cloud can
+            # crash if matplotlib isn't installed. Guard it so the app stays up.
+            styler = display_df.style.format(format_dict)
+            has_mpl = False
+            try:
+                import matplotlib  # noqa: F401
+
+                has_mpl = True
+            except Exception:
+                has_mpl = False
+
+            if has_mpl:
+                styler = styler.background_gradient(
+                    subset=['Unrealized PnL'],
+                    cmap="RdBu",
+                    vmin=-5000,
+                    vmax=5000,
+                )
+
+            st.dataframe(styler, use_container_width=True, height=800)
         else:
             st.info("No active positions.")
                 
