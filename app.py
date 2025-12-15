@@ -174,20 +174,58 @@ def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
     col_alloc, col_pnl = st.columns(2)
     
     with col_alloc:
-        st.subheader("Asset Allocation")
+        st.subheader("📊 Portfolio Heatmap")
         if not positions_df.empty:
+            # Enhanced heatmap with better color scaling and layout
+            df_hm = positions_df.copy()
+            df_hm['PnL_Display'] = df_hm['Unrealized PnL'].apply(
+                lambda x: f"+${x:,.0f}" if x >= 0 else f"-${abs(x):,.0f}"
+            )
+            df_hm['Pct_Display'] = df_hm['PnL %'].apply(lambda x: f"{x:+.1f}%")
+            df_hm['Label'] = df_hm['Ticker'] + '<br>' + df_hm['PnL_Display'] + '<br>' + df_hm['Pct_Display']
+            
+            # Dynamic color range based on data
+            pnl_abs_max = max(abs(df_hm['Unrealized PnL'].min()), abs(df_hm['Unrealized PnL'].max()), 1000)
+            
             fig_tree = px.treemap(
-                positions_df,
+                df_hm,
                 path=[px.Constant("Portfolio"), 'Ticker'],
                 values='Market Value (USD)',
-                color='Unrealized PnL',
-                color_continuous_scale='RdBu',
+                color='PnL %',
+                color_continuous_scale=[
+                    [0.0, '#d32f2f'],      # Deep red
+                    [0.35, '#ef5350'],     # Light red
+                    [0.45, '#ffcdd2'],     # Very light red
+                    [0.5, '#f5f5f5'],      # Neutral gray
+                    [0.55, '#c8e6c9'],     # Very light green
+                    [0.65, '#66bb6a'],     # Light green
+                    [1.0, '#2e7d32']       # Deep green
+                ],
                 color_continuous_midpoint=0,
-                hover_data=['Net Shares', 'Price (Local)', 'Avg Cost', 'PnL %'],
-                title="Market Value & PnL Heatmap"
+                hover_data={
+                    'Ticker': True,
+                    'Net Shares': ':.2f',
+                    'Market Value (USD)': ':$,.0f',
+                    'Unrealized PnL': ':$+,.0f',
+                    'PnL %': ':+.2f%',
+                    'Avg Cost': ':$,.2f'
+                },
             )
-            fig_tree.update_traces(textinfo="label+value+percent parent")
-            fig_tree.update_layout(height=450, margin=dict(t=30, l=10, r=10, b=10))
+            fig_tree.update_traces(
+                textinfo="label+value+percent parent",
+                textfont=dict(size=12, color='white'),
+                marker=dict(line=dict(width=2, color='white')),
+                hovertemplate='<b>%{label}</b><br>Value: %{value:$,.0f}<br>Weight: %{percentParent:.1%}<extra></extra>'
+            )
+            fig_tree.update_layout(
+                height=500,
+                margin=dict(t=10, l=10, r=10, b=10),
+                coloraxis_colorbar=dict(
+                    title="PnL %",
+                    ticksuffix="%",
+                    len=0.7
+                )
+            )
             st.plotly_chart(fig_tree, use_container_width=True)
     
     with col_pnl:

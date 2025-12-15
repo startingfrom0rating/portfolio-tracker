@@ -384,8 +384,10 @@ class PortfolioEngine:
         df_txn['CreateDate'] = pd.to_datetime(df_txn['CreateDate'], errors='coerce')
         df_txn = df_txn.sort_values('CreateDate')
         
-        # Get date range: First Txn to Today
-        start_date = df_txn['CreateDate'].min().date()
+        # Get date range: From INCEPTION_DATE (or first txn, whichever is earlier) to Today
+        first_txn_date = df_txn['CreateDate'].min().date()
+        inception_date = self.INCEPTION_DATE.date()
+        start_date = min(first_txn_date, inception_date)
         end_date = pd.Timestamp.now().date()
         date_range = pd.date_range(start_date, end_date, freq='D')
         
