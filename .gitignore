@@ -1,0 +1,16 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Streamlit
+.streamlit/
+
+# Internal
+debug_*.py
+inspect_*.py
+checksum.py
+test_runner.py

@@ -1,0 +1,45 @@
+Symbol,TransactionType,CompanyName,Exchange,Quantity,FXRate,Currency,SecurityType,Price,Amount,CreateDate
+ARI,Market - Buy,Apollo Commercial Real Estate Finance Inc,US,4,1.00,USD,Equities,$10.1100,-$40.4400,12/05/2025 - 15:18
+CSGS,Market - Buy,CSG Systems International Inc.,US,256,1.00,USD,Equities,$77.2800,"-$19,783.6800",12/05/2025 - 13:22
+WTS,Market - Buy,"Watts Water Technologies, Inc. - Ordinary Shares - Class A",US,66,1.00,USD,Equities,$272.2600,"-$17,969.1600",12/05/2025 - 13:20
+GOOGL,Market - Buy,Alphabet Inc - Ordinary Shares - Class A,US,50,1.00,USD,Equities,$321.4700,"-$16,073.5000",12/05/2025 - 12:09
+NWPX,Market - Buy,Northwest Pipe Co.,US,312,1.00,USD,Equities,$59.8900,"-$18,685.6800",12/05/2025 - 12:06
+TMO,Market - Buy,Thermo Fisher Scientific Inc.,US,28,1.00,USD,Equities,$572.9100,"-$16,041.4800",12/05/2025 - 12:05
+HWC,Market - Buy,Highway Capital PLC,US,200,0.75,GBP,Equities,£63.0600,"-£12,612.0000",12/05/2025 - 11:49
+WLDN,Market - Buy,Willdan Group Inc,US,190,1.00,USD,Equities,$104.3500,"-$19,826.5000",12/05/2025 - 10:45
+APH,Market - Buy,Amphenol Corp. - Ordinary Shares - Class A,US,143,1.00,USD,Equities,$139.9000,"-$20,005.7000",12/05/2025 - 09:30
+XYL,Market - Buy,Xylem Inc,US,142,1.00,USD,Equities,$141.4800,"-$20,090.1600",12/05/2025 - 09:30
+8053,Market - Buy,SUMITOMO CORP,PK,640,155.76,JPY,Equities,"¥4,846.0000","-¥19,950.7900",12/02/2025 - 06:00
+PRIM,Market - Buy,Primoris Services Corp,US,153,1.00,USD,Equities,$124.1500,"-$18,994.9500",12/01/2025 - 09:34
+ELA,Market - Buy,Envela Corp,US,578,1.00,USD,Equities,$11.7100,"-$6,768.3800",12/01/2025 - 09:34
+K,Dividends,Kinross Gold Corporation,T,308,1.38,CAD,Equities,C$0.0493,C$10.7694,11/26/2025 - 00:00
+LCTU,Market - Buy,BlackRock ETF Trust - BlackRock U.S. Carbon Transition Readiness ETF,US,278,1.00,USD,Equities,$72.1600,"-$20,060.4800",11/24/2025 - 09:32
+CMI,Market - Buy,Cummins Inc.,US,42,1.00,USD,Equities,$482.0000,"-$20,244.0000",11/24/2025 - 09:32
+1909,Market - Buy,Nippon Dry-Chemical Co Ltd.,PK,303,155.76,JPY,Equities,"¥7,990.0000","-¥15,383.3500",11/21/2025 - 06:01
+7936,Market - Buy,ASICS Corp,PK,859,155.76,JPY,Equities,"¥3,744.0000","-¥20,435.7500",11/21/2025 - 06:01
+B-T-6.250-15052030,Coupon Payment,T-BOND 6.250% 15-May-2030,US,1,1.00,USD,Bonds,"$1,156.2500","$1,156.2500",11/15/2025 - 18:21
+K,Market - Buy,Kinross Gold Corporation,T,308,1.38,CAD,Equities,C$36.7100,"-C$8,069.9700",11/13/2025 - 09:45
+B-T-6.250-15052030,Market - Buy,T-BOND 6.250% 15-May-2030,US,37,1.00,USD,Bonds,"$1,045.8384","-$39,817.4200",11/10/2025 - 13:18
+NVT,Market - Buy,nVent Electric plc,US,178,1.00,USD,Equities,$111.9900,"-$19,934.2200",11/10/2025 - 10:33
+C,Dividends,Citigroup Inc,US,210,1.00,USD,Equities,$0.6000,$126.0000,11/03/2025 - 00:00
+MP,Limit - Sell,MP Materials Corporation,US,-100,1.00,USD,Equities,$61.9400,"$6,194.0000",10/31/2025 - 13:20
+AGX,Dividends,"Argan, Inc.",US,55,1.00,USD,Equities,$0.5000,$27.5000,10/23/2025 - 00:00
+C,Market - Buy,Citigroup Inc,US,210,1.00,USD,Equities,$96.6600,"-$20,298.6000",10/17/2025 - 11:31
+AGX,Limit - Buy,"Argan, Inc.",US,55,1.00,USD,Equities,$299.7300,"-$16,485.1500",10/16/2025 - 15:21
+MP,Limit - Buy,MP Materials Corporation,US,100,1.00,USD,Equities,$83.9200,"-$8,392.0000",10/16/2025 - 15:14
+ANET,Market - Buy,Arista Networks Inc,US,100,1.00,USD,Equities,$147.2000,"-$14,720.0000",10/16/2025 - 13:36
+DRD,Market - Buy,DRDGold Ltd. - ADR,US,233,1.00,USD,Equities,$29.2400,"-$6,812.9200",10/14/2025 - 12:09
+DRD,Limit - Buy,DRDGold Ltd. - ADR,US,100,1.00,USD,Equities,$28.2800,"-$2,828.0000",10/09/2025 - 12:36
+EOSE,Limit - Buy,Eos Energy Enterprises Inc - Ordinary Shares - Class A,US,200,1.00,USD,Equities,$14.9100,"-$2,982.0000",10/09/2025 - 09:32
+STRL,Market - Sell,Sterling Infrastructure Inc,US,-22,1.00,USD,Equities,$359.6100,"$7,911.4200",10/08/2025 - 12:56
+MSFT,Market - Buy,Microsoft Corporation,US,14,1.00,USD,Equities,$523.9900,"-$7,335.8600",10/08/2025 - 12:50
+STRL,Market - Sell,Sterling Infrastructure Inc,US,-28,1.00,USD,Equities,$355.6300,"$9,957.6400",10/08/2025 - 10:33
+QQQ,Market - Buy,Invesco Capital Management LLC - Invesco QQQ Trust Series 1,US,20,1.00,USD,Equities,$605.0700,"-$12,101.4000",10/07/2025 - 12:36
+QQQ,Market - Sell,Invesco Capital Management LLC - Invesco QQQ Trust Series 1,US,-10,1.00,USD,Equities,$605.0400,"$6,050.4000",10/07/2025 - 12:36
+FDEM,Market - Sell,Fidelity Covington Trust - Fidelity Emerging Markets Multifactor ETF,US,-392,1.00,USD,Equities,$30.5000,"$11,956.0000",10/06/2025 - 15:55
+GE,Market - Buy,GE Aerospace,US,30,1.00,USD,Equities,$297.1700,"-$8,915.1000",10/06/2025 - 13:40
+NVDA,Limit - Buy,NVIDIA Corp,US,100,1.00,USD,Equities,$185.9700,"-$18,597.0000",10/06/2025 - 13:34
+FDEM,Market - Buy,Fidelity Covington Trust - Fidelity Emerging Markets Multifactor ETF,US,392,1.00,USD,Equities,$30.6100,"-$11,999.1200",10/06/2025 - 11:01
+STRL,Market - Buy,Sterling Infrastructure Inc,US,100,1.00,USD,Equities,$358.9500,"-$35,895.0000",10/06/2025 - 09:44
+ASA,Market - Buy,ASA Gold and Precious Metals Ltd,US,400,1.00,USD,Equities,$45.5200,"-$18,208.0000",10/03/2025 - 11:01
+QQQ,Market - Buy,Invesco Capital Management LLC - Invesco QQQ Trust Series 1,US,10,1.00,USD,Equities,$603.6700,"-$6,036.7000",10/02/2025 - 11:40
