@@ -24,7 +24,7 @@ class PortfolioEngine:
         self.errors = []
         self.total_dividends = 0.0  # Track total dividends received
         self.dividend_by_ticker = {}  # {ticker: total_dividends_usd}
-        self.FORCE_FALLBACK = ['HWC.L', 'HWC', 'B-T-6.250-15052030']
+        self.FORCE_FALLBACK = ['B-T-6.250-15052030']
         self._history_cache = None  # Cache for history data
         self._sp500_cache = None  # Cache for S&P 500 data
 
@@ -49,8 +49,10 @@ class PortfolioEngine:
 
         # Logic based on observation
         if exchange == 'US':
-            # Exception for HWC (Highway Capital PLC) which is likely UK 
-            # or if Currency is GBP.
+            # HWC is Hancock Whitney (US) even if the CSV reports GBP dollars, so keep the US ticker.
+            if symbol.upper() == 'HWC':
+                return symbol
+            # Any other USD-listed trade denominated in GBP is probably the London listing.
             if currency == 'GBP':
                 return f"{symbol}.L"
             return symbol
@@ -524,18 +526,8 @@ class PortfolioEngine:
                     fx = fx_hist['GBP=X']
                 
                 # Handling Pence?
-                # UK stocks (.L) usually in GBp (pence).
-                # If Price > 500, likely pence. If Price < 100, likely pounds?
-                # HWC Price 63.
-                # If 63 pence ($0.80), value is tiny.
-                # If 63 Pounds ($80), value is huge.
-                # Transaction Price £63.06.
-                # So it's Pounds!
-                # YF .L data is often in Pence. 
-                # e.g. HSBA.L is 700 (pence) = 7 GBP.
-                # I need to check if YF price is > 10x fallback price?
-                
-                # For HWC.L, let's assume it matches fallback (63).
+                # UK stocks (.L) are sometimes quoted in GBp (pence) rather than GBP.
+                # When history pricing seems unusually large, fallback values anchor the series to a realistic level.
                 
                 # Val = Qty * Px / FX
                 val = (qty * px) / fx

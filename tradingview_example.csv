@@ -1,0 +1,7 @@
+Symbol,Side,Qty,Fill Price,Commission,Closing Time
+NASDAQ:AAPL,Buy,10,217,0,2024-09-17 0:00:00
+NASDAQ:AAPL,Sell,10,240.01,,2024-09-18 0:00:00
+NASDAQ:AAPL,Dividend,0.25,,,2024-11-14 0:00:00
+$CASH,Withdrawal,2000,,,2024-08-25 1:20:12
+$CASH,Deposit,5000,0,0,2024-08-24 0:00:00
+$CASH,Taxes and fees,10.25,,0,2023-08-25 10:37:00
