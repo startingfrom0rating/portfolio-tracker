@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 from portfolio_engine import PortfolioEngine
+from quant_ui import render_advanced_quant_tab
 
 try:
     from streamlit_autorefresh import st_autorefresh  # type: ignore
@@ -740,10 +741,11 @@ def main():
     timeframe_returns = engine.get_timeframe_returns()
     
     # --- Tabs ---
-    tab_overview, tab_holdings, tab_analysis = st.tabs([
+    tab_overview, tab_holdings, tab_analysis, tab_quant = st.tabs([
         "📊 Overview",
         "📋 Holdings",
-        "🔎 Analysis"
+        "🔎 Analysis",
+        "🔬 Quant Analysis"
     ])
     
     with tab_overview:
@@ -754,6 +756,9 @@ def main():
     
     with tab_analysis:
         render_analysis_tab(engine, history_df)
+    
+    with tab_quant:
+        render_advanced_quant_tab(engine, history_df, valuation_data['total_value'])
     
     # Footer
     st.markdown("---")
