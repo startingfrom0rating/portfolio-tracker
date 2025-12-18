@@ -308,16 +308,31 @@ class PortfolioEngine:
             # Let's standardize on USD/YYY?
             # JPY=X -> Rate ~ 150 (USD/JPY). Value_USD = Value_JPY / Rate.
             # CAD=X -> Rate ~ 1.35 (USD/CAD). Value_USD = Value_CAD / Rate.
+            # GBP=X -> Rate ~ 0.79 (GBP/USD). Value_USD = Value_GBP / Rate.
             # So Price_USD = Price_Local / Rate.
             
-            fx_tickers = ['JPY=X', 'CAD=X'] # GBP=X if needed
-            fx_data = yf.download(fx_tickers, period="1d", progress=False)['Close'].iloc[-1]
-            
+            fx_tickers = ['JPY=X', 'CAD=X', 'GBP=X']
+            try:
+                fx_data = yf.download(fx_tickers, period="1d", progress=False)['Close'].iloc[-1]
+            except Exception as e:
+                print(f"Error downloading FX data: {e}")
+                fx_data = pd.Series()
+
+            # Helper to safely get rate
+            def get_rate(ticker, default):
+                if isinstance(fx_data, pd.Series) and ticker in fx_data.index:
+                    val = fx_data[ticker]
+                    if pd.notnull(val) and val > 0:
+                        return val
+                return default
+
             self.fx_rates = {
-                'JPY': fx_data['JPY=X'] if 'JPY=X' in fx_data else 1.0,
-                'CAD': fx_data['CAD=X'] if 'CAD=X' in fx_data else 1.0,
+                'JPY': get_rate('JPY=X', 150.0), # Fallback to approx 150
+                'CAD': get_rate('CAD=X', 1.40),  # Fallback to approx 1.40
+                'GBP': get_rate('GBP=X', 0.79),  # Fallback to approx 0.79
                 'USD': 1.0
             }
+            print(f"FX Rates used: {self.fx_rates}")
             # Handle Single ticker result (series vs df)
             if isinstance(fx_data, float): # Only one requested?
                 # Not applicable here as we requested list.
@@ -491,9 +506,15 @@ class PortfolioEngine:
             fx_hist = fx_hist.reindex(date_range).ffill().bfill()
             
             # Handle Single Value FX result if only one? (Usually returns df with columns if list passed)
-            if 'JPY=X' not in fx_hist.columns: fx_hist['JPY=X'] = 1.0 
-            if 'CAD=X' not in fx_hist.columns: fx_hist['CAD=X'] = 1.0
-            if 'GBP=X' not in fx_hist.columns: fx_hist['GBP=X'] = 1.0
+            # Set reasonable defaults if missing to avoid 100x valuation errors
+            if 'JPY=X' not in fx_hist.columns: fx_hist['JPY=X'] = 150.0 
+            if 'CAD=X' not in fx_hist.columns: fx_hist['CAD=X'] = 1.40
+            if 'GBP=X' not in fx_hist.columns: fx_hist['GBP=X'] = 0.79
+            
+            # Fill NaNs in FX with defaults (in case of partial history gaps)
+            fx_hist['JPY=X'] = fx_hist['JPY=X'].fillna(150.0)
+            fx_hist['CAD=X'] = fx_hist['CAD=X'].fillna(1.40)
+            fx_hist['GBP=X'] = fx_hist['GBP=X'].fillna(0.79)
             
         except Exception as e:
             print(f"History fetch error: {e}")
