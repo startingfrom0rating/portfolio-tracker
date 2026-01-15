@@ -673,14 +673,23 @@ def render_dividends_tab(engine):
     else:
         st.caption("No dividend history in transaction records.")
     
-    # Dividend yield summary by position
+    # Combined Dividend View (CSV + Recent)
     st.markdown("---")
-    st.subheader("Dividend Yield by Position")
+    st.subheader("Total Dividend Income by Position")
     
-    dividend_by_ticker = engine.dividend_by_ticker
-    if dividend_by_ticker:
+    # Merge CSV dividends with recent yfinance dividends
+    combined_dividends = engine.dividend_by_ticker.copy()
+    
+    # Add recent dividends from the fetch result
+    if div_data.get('recent_dividends'):
+        for d in div_data['recent_dividends']:
+            tk = d['ticker']
+            amt = d['amount']
+            combined_dividends[tk] = combined_dividends.get(tk, 0.0) + amt
+            
+    if combined_dividends:
         yield_data = []
-        for ticker, divs in dividend_by_ticker.items():
+        for ticker, divs in combined_dividends.items():
             yield_data.append({
                 'Ticker': ticker,
                 'Total Dividends': divs
