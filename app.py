@@ -109,112 +109,6 @@ def load_engine():
     return eng
 
 
-def render_interactive_chart(df, y_col, key_prefix):
-    """Render a Yahoo Finance-style interactive chart with time range selectors."""
-    
-    # Time ranges
-    ranges = {
-        '1D': pd.Timedelta(days=1),
-        '1W': pd.Timedelta(weeks=1),
-        '1M': pd.Timedelta(days=30),
-        '6M': pd.Timedelta(days=180),
-        'YTD': 'YTD',
-        '1Y': pd.Timedelta(days=365),
-        'All': None
-    }
-    
-    # Selection
-    opts = list(ranges.keys())
-    selection = st.radio("Range", opts, horizontal=True, index=len(opts)-1, key=f"{key_prefix}_range", label_visibility="collapsed")
-    
-    # Filter Data
-    if df.empty:
-        st.info("No data available.")
-        return
-
-    end_date = df.index.max()
-    filtered_df = df.copy()
-    
-    if selection == 'All':
-        pass
-    elif selection == 'YTD':
-        start_of_year = pd.Timestamp(f"{end_date.year}-01-01")
-        filtered_df = df[df.index >= start_of_year]
-    else:
-        delta = ranges[selection]
-        start_date = end_date - delta
-        filtered_df = df[df.index >= start_date]
-
-    # Handle empty slice (e.g. if selection is too short or gap in data)
-    if filtered_df.empty:
-        # Fallback to at least last 2 points if possible
-        filtered_df = df.tail(2) if len(df) >= 2 else df
-
-    # Determine Color (Green/Red)
-    if len(filtered_df) >= 1:
-        start_val = filtered_df[y_col].iloc[0]
-        end_val = filtered_df[y_col].iloc[-1]
-        is_positive = end_val >= start_val
-        line_color = '#00C805' if is_positive else '#FF5000' # Yahoo Finance-ish green/red
-        
-        # Calculate change for display
-        chg = end_val - start_val
-        pct = (chg / start_val * 100) if start_val != 0 else 0
-        
-        # Header with big numbers
-        st.markdown(f"""
-        <div style="margin-bottom: 10px;">
-            <span style="font-size: 24px; font-weight: bold;">${end_val:,.2f}</span>
-            <span style="font-size: 16px; color: {line_color}; margin-left: 8px;">
-                {chg:+,.2f} ({pct:+.2f}%)
-            </span>
-            <span style="color: #666; font-size: 12px; margin-left: 5px;">
-                {selection}
-            </span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    else:
-        line_color = '#1976d2' # Default blue
-
-    # Plot
-    fig = px.area(
-        filtered_df,
-        x=filtered_df.index,
-        y=y_col,
-    )
-    
-    fig.update_traces(
-        line=dict(color=line_color, width=2),
-        fillcolor=line_color,
-        fill='tozeroy', 
-        opacity=0.1 # Light fill like YF
-    )
-    
-    # YF Style tweaks
-    fig.update_layout(
-        xaxis_title='',
-        yaxis_title='',
-        yaxis_tickprefix='$',
-        hovermode='x unified',
-        showlegend=False,
-        margin=dict(l=0, r=0, t=10, b=0),
-        height=300,
-        xaxis=dict(
-            showgrid=False,
-            # hide axis line optionally
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor='#f0f0f0',
-            zeroline=False
-        ),
-        plot_bgcolor='white'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-
 def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
     """Render the Overview tab."""
     total_val = valuation_data['total_value']
@@ -279,8 +173,23 @@ def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
     # Portfolio Growth Chart
     st.subheader("Portfolio Growth")
     if not history_df.empty:
-        # Replaced static chart with interactive Yahoo Finance-style chart
-        render_interactive_chart(history_df, 'Total', 'overview_chart')
+        fig_hist = px.line(
+            history_df, 
+            x=history_df.index, 
+            y='Total',
+            labels={'Total': 'Value ($)', 'index': 'Date'}
+        )
+        fig_hist.update_layout(
+            hovermode='x unified',
+            showlegend=False,
+            margin=dict(l=0, r=0, t=10, b=0),
+            height=300,
+            xaxis_title='',
+            yaxis_title='Value (USD)',
+            yaxis_tickprefix='$'
+        )
+        fig_hist.update_traces(line_color='#1976d2')
+        st.plotly_chart(fig_hist, use_container_width=True)
     
     st.markdown("---")
     
