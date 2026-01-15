@@ -902,6 +902,115 @@ class PortfolioEngine:
             pass
         return []
 
+    def get_dividend_data(self):
+        """Fetch dividend history and upcoming dividends for all holdings."""
+        results = {
+            'recorded_dividends': [],  # From transaction CSV
+            'recent_dividends': [],    # From yfinance (last 6 months)
+            'upcoming_dividends': [],  # Upcoming ex-dates
+            'total_recorded': self.total_dividends,
+            'total_recent': 0.0,
+        }
+        
+        # Get recorded dividends from transactions
+        if self.transactions is not None:
+            div_txns = self.transactions[
+                self.transactions['TransactionType'].str.lower().str.contains('dividend|distribution', na=False)
+            ].copy()
+            
+            if not div_txns.empty:
+                for _, row in div_txns.iterrows():
+                    fx_rate = row.get('FXRate', 1.0)
+                    if pd.isna(fx_rate) or fx_rate <= 0:
+                        fx_rate = 1.0
+                    amt_usd = row['Amount'] / float(fx_rate)
+                    
+                    results['recorded_dividends'].append({
+                        'ticker': row['YF_Ticker'],
+                        'date': row['CreateDate'],
+                        'amount': amt_usd,
+                        'currency': row.get('Currency', 'USD'),
+                        'shares': row['Quantity'],
+                        'source': 'CSV'
+                    })
+        
+        # Fetch recent dividend history from yfinance for each holding
+        cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=180)
+        csv_cutoff = pd.Timestamp('2025-12-13')  # Last CSV date
+        
+        for ticker in self.holdings.keys():
+            try:
+                # Skip non-yfinance tickers
+                if ticker.startswith('B-') or ticker.count('-') >= 2:
+                    continue
+                    
+                stock = yf.Ticker(ticker)
+                
+                # Get dividend history
+                divs = stock.dividends
+                if divs is not None and len(divs) > 0:
+                    # Filter to recent dividends after CSV cutoff
+                    recent = divs[divs.index > csv_cutoff]
+                    for dt, amount in recent.items():
+                        shares_held = self.holdings.get(ticker, 0)
+                        div_income = amount * shares_held
+                        
+                        # Convert if needed (rough estimate for non-USD)
+                        if ticker.endswith('.TO'):
+                            div_income /= 1.38  # CAD to USD estimate
+                        elif ticker.endswith('.L'):
+                            div_income *= 1.27  # GBP to USD estimate
+                        elif ticker.endswith('.T'):
+                            div_income /= 150   # JPY to USD estimate
+                        
+                        results['recent_dividends'].append({
+                            'ticker': ticker,
+                            'date': dt.strftime('%Y-%m-%d'),
+                            'per_share': amount,
+                            'shares': shares_held,
+                            'amount': div_income,
+                            'source': 'yfinance'
+                        })
+                        results['total_recent'] += div_income
+                
+                # Get upcoming dividend info
+                info = stock.info
+                ex_date = info.get('exDividendDate')
+                div_rate = info.get('dividendRate', 0)
+                
+                if ex_date and div_rate:
+                    ex_dt = pd.Timestamp(ex_date, unit='s')
+                    if ex_dt > pd.Timestamp.now():
+                        shares_held = self.holdings.get(ticker, 0)
+                        expected = (div_rate / 4) * shares_held  # Quarterly estimate
+                        
+                        # Convert if needed
+                        if ticker.endswith('.TO'):
+                            expected /= 1.38
+                        elif ticker.endswith('.L'):
+                            expected *= 1.27
+                        elif ticker.endswith('.T'):
+                            expected /= 150
+                        
+                        results['upcoming_dividends'].append({
+                            'ticker': ticker,
+                            'ex_date': ex_dt.strftime('%Y-%m-%d'),
+                            'annual_rate': div_rate,
+                            'shares': shares_held,
+                            'expected_quarterly': expected,
+                            'yield': info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
+                        })
+            except Exception as e:
+                # Silently skip tickers that fail
+                continue
+        
+        # Sort by date
+        results['recorded_dividends'].sort(key=lambda x: x['date'], reverse=True)
+        results['recent_dividends'].sort(key=lambda x: x['date'], reverse=True)
+        results['upcoming_dividends'].sort(key=lambda x: x['ex_date'])
+        
+        return results
+
 if __name__ == "__main__":
     # Test run
     path1 = "c:/Users/Xxran/Downloads/backtest/attachment;filename=TransactionHistory_12_13_2025.csv"

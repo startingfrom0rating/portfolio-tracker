@@ -557,6 +557,152 @@ def render_analysis_tab(engine, history_df):
             st.plotly_chart(fig, use_container_width=True)
 
 
+def render_dividends_tab(engine):
+    """Render the Dividends tab."""
+    st.subheader("Dividend Tracker")
+    
+    with st.spinner("Fetching dividend data..."):
+        div_data = engine.get_dividend_data()
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    
+    total_recorded = div_data['total_recorded']
+    total_recent = div_data['total_recent']
+    total_all = total_recorded + total_recent
+    
+    col1.metric("Recorded Dividends (CSV)", f"${total_recorded:,.2f}")
+    col2.metric("New Dividends (Post-CSV)", f"${total_recent:,.2f}")
+    col3.metric("Total Dividends", f"${total_all:,.2f}")
+    
+    st.markdown("---")
+    
+    # Upcoming Dividends
+    st.subheader("Upcoming Dividends")
+    upcoming = div_data['upcoming_dividends']
+    
+    if upcoming:
+        upcoming_df = pd.DataFrame(upcoming)
+        upcoming_df = upcoming_df.rename(columns={
+            'ticker': 'Ticker',
+            'ex_date': 'Ex-Date',
+            'annual_rate': 'Annual Rate',
+            'shares': 'Shares Held',
+            'expected_quarterly': 'Expected (Est.)',
+            'yield': 'Yield %'
+        })
+        
+        display_cols = ['Ticker', 'Ex-Date', 'Shares Held', 'Annual Rate', 'Expected (Est.)', 'Yield %']
+        display_cols = [c for c in display_cols if c in upcoming_df.columns]
+        
+        styler = upcoming_df[display_cols].style.format({
+            'Annual Rate': '${:.4f}',
+            'Expected (Est.)': '${:,.2f}',
+            'Yield %': '{:.2f}%',
+            'Shares Held': '{:,.0f}'
+        })
+        
+        st.dataframe(styler, use_container_width=True, hide_index=True)
+        
+        total_expected = sum(d['expected_quarterly'] for d in upcoming)
+        st.info(f"Estimated upcoming dividend income: **${total_expected:,.2f}**")
+    else:
+        st.caption("No upcoming ex-dividend dates found for your holdings.")
+    
+    st.markdown("---")
+    
+    # Recent dividends (post-CSV)
+    st.subheader("Recent Dividends (After Dec 13, 2025)")
+    recent = div_data['recent_dividends']
+    
+    if recent:
+        recent_df = pd.DataFrame(recent)
+        recent_df = recent_df.rename(columns={
+            'ticker': 'Ticker',
+            'date': 'Payment Date',
+            'per_share': 'Per Share',
+            'shares': 'Shares',
+            'amount': 'Amount (USD)',
+            'source': 'Source'
+        })
+        
+        display_cols = ['Ticker', 'Payment Date', 'Per Share', 'Shares', 'Amount (USD)']
+        display_cols = [c for c in display_cols if c in recent_df.columns]
+        
+        styler = recent_df[display_cols].style.format({
+            'Per Share': '${:.4f}',
+            'Amount (USD)': '${:,.2f}',
+            'Shares': '{:,.0f}'
+        })
+        
+        st.dataframe(styler, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No new dividend payments detected since Dec 13, 2025.")
+    
+    st.markdown("---")
+    
+    # Historical dividends from CSV
+    st.subheader("Recorded Dividend History (From CSV)")
+    recorded = div_data['recorded_dividends']
+    
+    if recorded:
+        recorded_df = pd.DataFrame(recorded)
+        recorded_df = recorded_df.rename(columns={
+            'ticker': 'Ticker',
+            'date': 'Date',
+            'amount': 'Amount (USD)',
+            'currency': 'Original Currency',
+            'shares': 'Shares at Time'
+        })
+        
+        display_cols = ['Ticker', 'Date', 'Amount (USD)', 'Original Currency', 'Shares at Time']
+        display_cols = [c for c in display_cols if c in recorded_df.columns]
+        
+        styler = recorded_df[display_cols].style.format({
+            'Amount (USD)': '${:,.2f}',
+            'Shares at Time': '{:,.0f}'
+        })
+        
+        st.dataframe(styler, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No dividend history in transaction records.")
+    
+    # Dividend yield summary by position
+    st.markdown("---")
+    st.subheader("Dividend Yield by Position")
+    
+    dividend_by_ticker = engine.dividend_by_ticker
+    if dividend_by_ticker:
+        yield_data = []
+        for ticker, divs in dividend_by_ticker.items():
+            yield_data.append({
+                'Ticker': ticker,
+                'Total Dividends': divs
+            })
+        
+        if yield_data:
+            yield_df = pd.DataFrame(yield_data).sort_values('Total Dividends', ascending=False)
+            
+            fig = px.bar(
+                yield_df,
+                x='Ticker',
+                y='Total Dividends',
+                color='Total Dividends',
+                color_continuous_scale='Greens',
+                text_auto='.2s'
+            )
+            fig.update_traces(textposition='outside')
+            fig.update_layout(
+                height=300,
+                margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=False,
+                xaxis_title='',
+                yaxis_title='Dividends (USD)',
+                yaxis_tickprefix='$'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
 def main():
     if st_autorefresh is not None:
         st_autorefresh(interval=3 * 60 * 1000, key="portfolio_autorefresh")
@@ -591,13 +737,16 @@ def main():
     history_df = engine.get_history(breakdown=True)
     timeframe_returns = engine.get_timeframe_returns()
     
-    tab_overview, tab_holdings, tab_analysis = st.tabs(["Overview", "Holdings", "Analysis"])
+    tab_overview, tab_holdings, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Dividends", "Analysis"])
     
     with tab_overview:
         render_overview_tab(engine, valuation_data, history_df, timeframe_returns)
     
     with tab_holdings:
         render_holdings_tab(engine, history_df)
+    
+    with tab_dividends:
+        render_dividends_tab(engine)
     
     with tab_analysis:
         render_analysis_tab(engine, history_df)
