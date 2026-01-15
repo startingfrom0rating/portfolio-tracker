@@ -126,16 +126,24 @@ class PortfolioEngine:
         # Treat them as an additional cash outflow so total value and returns are net.
         self.cash_balance -= float(self.TOTAL_COMMISSIONS)
         
-        # Track dividends
+        # Track dividends (convert to USD using FXRate)
         self.total_dividends = 0.0
         self.dividend_by_ticker = {}
         for _, row in self.transactions.iterrows():
             txn_type = str(row['TransactionType']).lower()
             if 'dividend' in txn_type or 'distribution' in txn_type:
                 amt = row['Amount']
+                # Convert to USD using FXRate (FXRate is local_currency / USD)
+                # e.g., CAD dividend with FXRate 1.38 means 1 USD = 1.38 CAD
+                # So USD amount = local_amount / FXRate
+                fx_rate = row.get('FXRate', 1.0)
+                if pd.notna(fx_rate) and fx_rate > 0:
+                    amt_usd = amt / float(fx_rate)
+                else:
+                    amt_usd = amt
                 ticker = row['YF_Ticker']
-                self.total_dividends += amt
-                self.dividend_by_ticker[ticker] = self.dividend_by_ticker.get(ticker, 0.0) + amt
+                self.total_dividends += amt_usd
+                self.dividend_by_ticker[ticker] = self.dividend_by_ticker.get(ticker, 0.0) + amt_usd
         
         # Calculate Cost Basis
         self._calculate_cost_basis()

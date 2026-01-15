@@ -35,6 +35,13 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
+    /* Force metric values to be visible (black text) */
+    .stMetric [data-testid="stMetricValue"] {
+        color: #111 !important;
+    }
+    .stMetric [data-testid="stMetricDelta"] {
+        color: #333 !important;
+    }
     h1, h2, h3 {
         font-weight: 500 !important;
     }
