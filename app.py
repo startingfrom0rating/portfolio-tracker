@@ -89,6 +89,12 @@ def _robust_symmetric_range(values, fallback=1.0, q=0.95):
 @st.cache_resource
 def load_engine():
     """Initialize and load data into the Portfolio Engine."""
+    # Force reload of the module to ensure latest code is used (e.g. new methods)
+    import portfolio_engine
+    import importlib
+    importlib.reload(portfolio_engine)
+    from portfolio_engine import PortfolioEngine
+    
     path1 = os.path.join(BASE_DIR, TRANSACTION_FILE)
     path2 = os.path.join(BASE_DIR, OPEN_POSITION_FILE)
     
