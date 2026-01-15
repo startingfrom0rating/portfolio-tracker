@@ -989,14 +989,6 @@ class PortfolioEngine:
                             results['total_recent'] += div_income
                 
                 # Get upcoming dividend info
-                            'per_share': amount,
-                            'shares': shares_held,
-                            'amount': div_income,
-                            'source': 'yfinance'
-                        })
-                        results['total_recent'] += div_income
-                
-                # Get upcoming dividend info
                 info = stock.info
                 ex_date = info.get('exDividendDate')
                 div_rate = info.get('dividendRate', 0)
