@@ -947,37 +947,48 @@ class PortfolioEngine:
                     
                 stock = yf.Ticker(ticker)
                 
-                # Method 1: Get dividend history from .dividends (primary)
-                divs = stock.dividends
+                # Method 1: Get dividend history from .history() (most reliable)
+                # Fetching 6mo history guarantees we see recent and upcoming payouts if they are in the data stream
+                hist = stock.history(period="6mo")
                 
-                # TZ-aware fix: Convert index to naive date for comparison
-                if divs is not None and not divs.empty:
-                    # div.index is DatetimeIndex usually with TZ
-                    # We convert to date objects for safe comparison
-                    div_dates = divs.index.to_series().apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else x)
+                if 'Dividends' in hist.columns:
+                    divs = hist['Dividends']
+                    divs = divs[divs > 0] # Filter only actual params
                     
-                    recent_mask = div_dates > csv_cutoff
-                    recent = divs[recent_mask]
-                    
-                    for dt, amount in recent.items():
-                        # Extract date object
-                        date_obj = dt.date() if hasattr(dt, 'date') else dt
-                        date_str = date_obj.strftime('%Y-%m-%d')
+                    if not divs.empty:
+                        # TZ-aware fix: Convert index to naive date for comparison
+                        div_dates = divs.index.to_series().apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else x)
                         
-                        shares_held = self.holdings.get(ticker, 0)
-                        div_income = amount * shares_held
+                        recent_mask = div_dates > csv_cutoff
+                        recent = divs[recent_mask]
                         
-                        # Convert if needed (rough estimate for non-USD)
-                        if ticker.endswith('.TO'):
-                            div_income /= 1.38  # CAD to USD estimate
-                        elif ticker.endswith('.L'):
-                            div_income *= 1.27  # GBP to USD estimate
-                        elif ticker.endswith('.T'):
-                            div_income /= 150   # JPY to USD estimate
-                        
-                        results['recent_dividends'].append({
-                            'ticker': ticker,
-                            'date': date_str,
+                        for dt, amount in recent.items():
+                            # Extract date object
+                            date_obj = dt.date() if hasattr(dt, 'date') else dt
+                            date_str = date_obj.strftime('%Y-%m-%d')
+                            
+                            shares_held = self.holdings.get(ticker, 0)
+                            div_income = amount * shares_held
+                            
+                            # Convert if needed (rough estimate for non-USD)
+                            if ticker.endswith('.TO'):
+                                div_income /= 1.38  # CAD to USD estimate
+                            elif ticker.endswith('.L'):
+                                div_income *= 1.27  # GBP to USD estimate
+                            elif ticker.endswith('.T'):
+                                div_income /= 150   # JPY to USD estimate
+                            
+                            results['recent_dividends'].append({
+                                'ticker': ticker,
+                                'date': date_str,
+                                'per_share': amount,
+                                'shares': shares_held,
+                                'amount': div_income,
+                                'source': 'yfinance'
+                            })
+                            results['total_recent'] += div_income
+                
+                # Get upcoming dividend info
                             'per_share': amount,
                             'shares': shares_held,
                             'amount': div_income,
