@@ -843,6 +843,27 @@ class PortfolioEngine:
             'contributors': contributors[:10]
         }
 
+    def get_holdings_at_date(self, target_date):
+        """Calculate holdings for a ticker at a specific date."""
+        # Convert target_date to Timestamp
+        ts = pd.Timestamp(target_date)
+        
+        # Filter transactions on or before target_date
+        mask = self.transactions['CreateDate'] <= ts
+        history_txns = self.transactions[mask]
+        
+        holdings = {}
+        for _, row in history_txns.iterrows():
+            ticker = row['YF_Ticker']
+            qty = row['Quantity']
+            txn_type = str(row['TransactionType']).lower()
+            
+            if 'buy' in txn_type or 'sell' in txn_type:
+                if 'dividend' not in txn_type:
+                     holdings[ticker] = holdings.get(ticker, 0.0) + qty
+                     
+        return holdings
+
     def get_holdings_detail(self):
         """Get detailed holdings with daily change and portfolio weight."""
         valuations = self.get_valuations()
@@ -967,7 +988,15 @@ class PortfolioEngine:
                             date_obj = dt.date() if hasattr(dt, 'date') else dt
                             date_str = date_obj.strftime('%Y-%m-%d')
                             
-                            shares_held = self.holdings.get(ticker, 0)
+                            # Calculate shares held ON the ex-dividend date
+                            # This answers user's request to "match data with purchase date"
+                            historical_holdings = self.get_holdings_at_date(date_obj)
+                            shares_held = historical_holdings.get(ticker, 0)
+                            
+                            # Skip if we didn't hold shares on the ex-date
+                            if shares_held <= 0:
+                                continue
+                            
                             div_income = amount * shares_held
                             
                             # Convert if needed (rough estimate for non-USD)
