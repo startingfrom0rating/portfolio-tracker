@@ -936,7 +936,8 @@ class PortfolioEngine:
         
         # Fetch recent dividend history from yfinance for each holding
         cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=180)
-        csv_cutoff = pd.Timestamp('2025-12-13')  # Last CSV date
+        # Use simple date comparison (naive) to avoid timezone issues
+        csv_cutoff = pd.Timestamp('2025-12-13').date()
         
         for ticker in self.holdings.keys():
             try:
@@ -946,12 +947,23 @@ class PortfolioEngine:
                     
                 stock = yf.Ticker(ticker)
                 
-                # Get dividend history
+                # Method 1: Get dividend history from .dividends (primary)
                 divs = stock.dividends
-                if divs is not None and len(divs) > 0:
-                    # Filter to recent dividends after CSV cutoff
-                    recent = divs[divs.index > csv_cutoff]
+                
+                # TZ-aware fix: Convert index to naive date for comparison
+                if divs is not None and not divs.empty:
+                    # div.index is DatetimeIndex usually with TZ
+                    # We convert to date objects for safe comparison
+                    div_dates = divs.index.to_series().apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else x)
+                    
+                    recent_mask = div_dates > csv_cutoff
+                    recent = divs[recent_mask]
+                    
                     for dt, amount in recent.items():
+                        # Extract date object
+                        date_obj = dt.date() if hasattr(dt, 'date') else dt
+                        date_str = date_obj.strftime('%Y-%m-%d')
+                        
                         shares_held = self.holdings.get(ticker, 0)
                         div_income = amount * shares_held
                         
@@ -965,7 +977,7 @@ class PortfolioEngine:
                         
                         results['recent_dividends'].append({
                             'ticker': ticker,
-                            'date': dt.strftime('%Y-%m-%d'),
+                            'date': date_str,
                             'per_share': amount,
                             'shares': shares_held,
                             'amount': div_income,
