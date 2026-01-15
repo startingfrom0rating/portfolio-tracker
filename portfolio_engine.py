@@ -77,6 +77,9 @@ class PortfolioEngine:
             
             # Map Tickers
             df['YF_Ticker'] = df.apply(self.get_yf_ticker, axis=1)
+
+            # Ensure CreateDate is datetime
+            df['CreateDate'] = pd.to_datetime(df['CreateDate'], errors='coerce')
             
             self.transactions = df
             
