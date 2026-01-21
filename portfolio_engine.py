@@ -255,73 +255,97 @@ class PortfolioEngine:
         if not tickers:
             return
 
-        # Download batch
-        # Using counters to handle potential issues
         print(f"Fetching data for: {tickers}")
+        self.stale_tickers = []  # Track tickers using stale fallback data
+        
         try:
-            # We only need latest price for current valuation
-            # But for history we might need more. For now, let's get 1mo to be safe, or 1d if just current.
-            # Plan mentions historical equity curve, so we might need full history later.
-            # For the MVP validation step, let's get '1d' or '5d' to ensure we have a close.
-            # Actually, fetch history separately for the chart.
-            # Here let's get current stats.
-            
-            # Note: Tickers with suffixes might need FX conversion handling if yfinance returns local price.
-            # yfinance returns price in currency of exchange.
-            # info['currency'] tells us.
-            
-            data = yf.Tickers(" ".join(tickers))
+            # Filter downloadable tickers
+            yf_tickers = [t for t in tickers if t not in self.FORCE_FALLBACK and not t.startswith('B-')]
             
             metrics = []
-            metrics = []
-            for ticker in tickers:
-                try:
-                    # Check Force Fallback first
-                    if ticker in self.FORCE_FALLBACK:
-                         hist = pd.DataFrame() # Treat as empty to trigger fallback logic
-                    else:
-                        # Better to use history metadata for price to avoid 'info' broken endpoint issues
-                        hist = data.tickers[ticker].history(period="1d")
-                    
-                    if hist.empty:
-                        # Fallback
-                        fallback = self.fallback_prices.get(ticker, self.fallback_prices.get(ticker.replace('.TO','').replace('.T','').replace('.L','')))
+            
+            # Batch download all ticker prices at once (much faster than individual calls)
+            if yf_tickers:
+                prices_df = yf.download(yf_tickers, period="5d", progress=False)['Close']
+                
+                # Handle single ticker case
+                if isinstance(prices_df, pd.Series):
+                    prices_df = prices_df.to_frame(name=yf_tickers[0])
+                
+                # Get latest prices from the download
+                for ticker in tickers:
+                    if ticker in self.FORCE_FALLBACK or ticker.startswith('B-'):
+                        # Use fallback for special tickers (bonds, etc)
+                        fallback = self.fallback_prices.get(ticker)
                         if fallback:
-                            current_price = fallback['Price']
-                            currency = fallback['Currency']
+                            metrics.append({
+                                'Ticker': ticker,
+                                'Price': fallback['Price'],
+                                'Currency': fallback['Currency']
+                            })
                         else:
-                            current_price = 0.0
+                            metrics.append({'Ticker': ticker, 'Price': 0.0, 'Currency': 'USD'})
+                    elif ticker in prices_df.columns:
+                        # Get latest non-null price
+                        price_series = prices_df[ticker].dropna()
+                        if not price_series.empty:
+                            current_price = price_series.iloc[-1]
                             currency = 'USD'
+                            if ticker.endswith('.TO'):
+                                currency = 'CAD'
+                            elif ticker.endswith('.T'):
+                                currency = 'JPY'
+                            elif ticker.endswith('.L'):
+                                currency = 'GBP'
+                            metrics.append({
+                                'Ticker': ticker,
+                                'Price': current_price,
+                                'Currency': currency
+                            })
+                        else:
+                            # Fallback if no price data (rate limited)
+                            fallback = self.fallback_prices.get(ticker)
+                            if fallback:
+                                self.stale_tickers.append(ticker)
+                                metrics.append({
+                                    'Ticker': ticker,
+                                    'Price': fallback['Price'],
+                                    'Currency': fallback['Currency']
+                                })
+                            else:
+                                metrics.append({'Ticker': ticker, 'Price': 0.0, 'Currency': 'USD'})
                     else:
-                        current_price = hist['Close'].iloc[-1]
-                        currency = 'USD'
-                        if ticker.endswith('.TO'):
-                            currency = 'CAD'
-                        elif ticker.endswith('.T'):
-                            currency = 'JPY'
-                        elif ticker.endswith('.L'):
-                            currency = 'GBP' 
-                    
-                    metrics.append({
-                        'Ticker': ticker,
-                        'Price': current_price,
-                        'Currency': currency
-                    })
-                except Exception as e:
-                    print(f"Error fetching {ticker}: {e}")
-                    metrics.append({'Ticker': ticker, 'Price': 0.0, 'Currency': 'USD'})
+                        # Ticker not in download result (rate limited), use fallback
+                        fallback = self.fallback_prices.get(ticker)
+                        if fallback:
+                            self.stale_tickers.append(ticker)
+                            metrics.append({
+                                'Ticker': ticker,
+                                'Price': fallback['Price'],
+                                'Currency': fallback['Currency']
+                            })
+                        else:
+                            metrics.append({'Ticker': ticker, 'Price': 0.0, 'Currency': 'USD'})
+            else:
+                # All tickers need fallback
+                for ticker in tickers:
+                    fallback = self.fallback_prices.get(ticker)
+                    if fallback:
+                        self.stale_tickers.append(ticker)
+                        metrics.append({
+                            'Ticker': ticker,
+                            'Price': fallback['Price'],
+                            'Currency': fallback['Currency']
+                        })
+                    else:
+                        metrics.append({'Ticker': ticker, 'Price': 0.0, 'Currency': 'USD'})
+            
+            if self.stale_tickers:
+                print(f"WARNING: Using stale fallback prices (from Dec 14) for: {self.stale_tickers}")
             
             self.market_data = pd.DataFrame(metrics).set_index('Ticker')
             
-            # Fetch FX
-            # We need CADUSD=X, JPYUSD=X to convert TO USD.
-            # Or CAD=X (USD/CAD).
-            # Let's standardize on USD/YYY?
-            # JPY=X -> Rate ~ 150 (USD/JPY). Value_USD = Value_JPY / Rate.
-            # CAD=X -> Rate ~ 1.35 (USD/CAD). Value_USD = Value_CAD / Rate.
-            # GBP=X -> Rate ~ 0.79 (GBP/USD). Value_USD = Value_GBP / Rate.
-            # So Price_USD = Price_Local / Rate.
-            
+            # Fetch FX rates in single batch call
             fx_tickers = ['JPY=X', 'CAD=X', 'GBP=X']
             try:
                 fx_data = yf.download(fx_tickers, period="1d", progress=False)['Close'].iloc[-1]
@@ -338,16 +362,12 @@ class PortfolioEngine:
                 return default
 
             self.fx_rates = {
-                'JPY': get_rate('JPY=X', 150.0), # Fallback to approx 150
-                'CAD': get_rate('CAD=X', 1.40),  # Fallback to approx 1.40
-                'GBP': get_rate('GBP=X', 0.79),  # Fallback to approx 0.79
+                'JPY': get_rate('JPY=X', 150.0),
+                'CAD': get_rate('CAD=X', 1.40),
+                'GBP': get_rate('GBP=X', 0.79),
                 'USD': 1.0
             }
             print(f"FX Rates used: {self.fx_rates}")
-            # Handle Single ticker result (series vs df)
-            if isinstance(fx_data, float): # Only one requested?
-                # Not applicable here as we requested list.
-                pass
                 
         except Exception as e:
              self.errors.append(f"Error fetching market data: {str(e)}")
@@ -405,7 +425,17 @@ class PortfolioEngine:
 
     def get_history(self, breakdown=False):
         """Calculates historical portfolio value. 
-           If breakdown=True, returns DataFrame with columns for each asset."""
+           If breakdown=True, returns DataFrame with columns for each asset.
+           Results are cached internally to avoid repeated yfinance calls."""
+        
+        # Check internal cache first
+        cache_key = f"history_{breakdown}"
+        if self._history_cache is not None and cache_key in self._history_cache:
+            return self._history_cache[cache_key]
+        
+        if self._history_cache is None:
+            self._history_cache = {}
+        
         # 1. Reconstruct Daily Holdings
         # Sort transactions by date
         df_txn = self.transactions.copy()
@@ -566,6 +596,7 @@ class PortfolioEngine:
                 total_hist_val += val.fillna(0.0)
                 
         if not breakdown:
+            self._history_cache[cache_key] = total_hist_val
             return total_hist_val
             
         # If breakdown requested, return DF with all columns
@@ -595,7 +626,8 @@ class PortfolioEngine:
                 
                 val = (q * p) / fx
                 history_df[ticker] = val.fillna(0.0)
-                
+        
+        self._history_cache[cache_key] = history_df
         return history_df
 
     def get_sp500_history(self, start_date=None, end_date=None):
@@ -1057,6 +1089,79 @@ class PortfolioEngine:
         results['upcoming_dividends'].sort(key=lambda x: x['ex_date'])
         
         return results
+
+    def get_equity_price_history(self, ticker, period='1y'):
+        """Fetch historical price data for a specific equity.
+        
+        Args:
+            ticker: The YF ticker symbol
+            period: Time period - '1mo', '6mo', '1y', 'ytd', or 'max'
+            
+        Returns:
+            DataFrame with Date index and Close prices, or empty DataFrame on error
+        """
+        try:
+            # Handle forced fallback tickers
+            if ticker in self.FORCE_FALLBACK:
+                return pd.DataFrame()
+            
+            # Use yf.download instead of Ticker.history (more reliable)
+            if period == 'ytd':
+                start_date = pd.Timestamp(f'{pd.Timestamp.now().year}-01-01')
+                hist = yf.download(ticker, start=start_date, progress=False)
+            else:
+                hist = yf.download(ticker, period=period, progress=False)
+            
+            if hist.empty:
+                return pd.DataFrame()
+            
+            # Handle multi-level columns from yf.download
+            if isinstance(hist.columns, pd.MultiIndex):
+                hist.columns = hist.columns.get_level_values(0)
+            
+            # Return just the Close prices with date index
+            result = hist[['Close']].copy()
+            result.index = pd.to_datetime(result.index).tz_localize(None)
+            return result
+            
+        except Exception as e:
+            print(f"Error fetching history for {ticker}: {e}")
+            return pd.DataFrame()
+    
+    def get_buy_transactions(self, ticker):
+        """Get all buy transactions for a specific ticker.
+        
+        Args:
+            ticker: The YF ticker symbol
+            
+        Returns:
+            List of dicts with 'date', 'price', 'quantity', 'currency' for each buy
+        """
+        if self.transactions is None:
+            return []
+        
+        buys = []
+        for _, row in self.transactions.iterrows():
+            txn_type = str(row['TransactionType']).lower()
+            yf_ticker = row['YF_Ticker']
+            
+            # Match ticker and ensure it's a buy transaction
+            if yf_ticker == ticker and 'buy' in txn_type and 'dividend' not in txn_type:
+                buy_date = pd.to_datetime(row['CreateDate'])
+                buy_price = row['Price']
+                quantity = row['Quantity']
+                currency = row['Currency']
+                
+                buys.append({
+                    'date': buy_date,
+                    'price': buy_price,
+                    'quantity': quantity,
+                    'currency': currency
+                })
+        
+        # Sort by date
+        buys.sort(key=lambda x: x['date'])
+        return buys
 
 if __name__ == "__main__":
     # Test run

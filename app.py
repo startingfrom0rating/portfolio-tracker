@@ -60,6 +60,7 @@ st.markdown("""
 TRANSACTION_FILE = "attachment;filename=TransactionHistory_12_13_2025.csv"
 OPEN_POSITION_FILE = "attachment;filename=OpenPosition_12_14_2025.csv"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEEPSEEK_API_KEY = "sk-c2ea695f9fa340379cbc1321502b639d"
 
 
 def as_float(x, default=0.0):
@@ -86,6 +87,128 @@ def _robust_symmetric_range(values, fallback=1.0, q=0.95):
         return float(fallback)
 
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_equity_history(ticker, period):
+    """Cached function to fetch equity price history."""
+    import yfinance as yf
+    try:
+        if period == 'ytd':
+            start_date = pd.Timestamp(f'{pd.Timestamp.now().year}-01-01')
+            hist = yf.download(ticker, start=start_date, progress=False)
+        else:
+            hist = yf.download(ticker, period=period, progress=False)
+        
+        if hist.empty:
+            return pd.DataFrame()
+        
+        # Handle multi-level columns from yf.download
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+        
+        result = hist[['Close']].copy()
+        result.index = pd.to_datetime(result.index).tz_localize(None)
+        return result
+    except Exception as e:
+        print(f"Error fetching history for {ticker}: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=900)  # Cache for 15 minutes to avoid repeated API calls
+def get_price_movement_explanation(ticker, change_pct, news_headlines):
+    """Call DeepSeek API to explain a significant price movement."""
+    import requests
+    
+    if not news_headlines:
+        return "There is no clear reason for this price movement."
+    
+    # Format news for the prompt
+    news_text = "\n".join([f"- {h}" for h in news_headlines[:5]])
+    direction = "increased" if change_pct > 0 else "decreased"
+    
+    prompt = f"""The stock {ticker} has {direction} by {abs(change_pct):.1f}% today.
+
+Here are recent news headlines about this company:
+{news_text}
+
+Based on these headlines, provide a 1-2 sentence explanation for this price movement. If none of the headlines seem relevant to explaining the price change, respond with exactly: "There is no clear reason for this price movement."
+
+Be concise and factual."""
+
+    try:
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "You are a financial analyst assistant. Give brief, factual explanations for stock price movements."},
+                    {"role": "user", "content": prompt}
+                ],
+                "stream": False,
+                "max_tokens": 100
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data['choices'][0]['message']['content'].strip()
+        else:
+            return "Unable to fetch explanation at this time."
+    except Exception as e:
+        print(f"DeepSeek API error: {e}")
+        return "Unable to fetch explanation at this time."
+
+
+@st.cache_data(ttl=900)  # Cache for 15 minutes
+def fetch_stock_news(ticker):
+    """Fetch recent news headlines (last 7 days) for a ticker using web scraping."""
+    import requests
+    from bs4 import BeautifulSoup
+    from datetime import datetime, timedelta
+    
+    try:
+        # Use Google News RSS feed for the ticker, filter to last 7 days
+        # Add "when:7d" to limit to last week
+        url = f"https://news.google.com/rss/search?q={ticker}+stock+when:7d&hl=en-US&gl=US&ceid=US:en"
+        
+        response = requests.get(url, timeout=5, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'xml')
+            items = soup.find_all('item')[:5]
+            headlines = []
+            
+            for item in items:
+                title = item.find('title')
+                pub_date = item.find('pubDate')
+                
+                if title:
+                    # Double check the date is within last 7 days
+                    if pub_date:
+                        try:
+                            # Parse the pubDate (format: "Tue, 21 Jan 2026 12:00:00 GMT")
+                            date_str = pub_date.text
+                            pub_datetime = datetime.strptime(date_str, "%a, %d %b %Y %H:%M:%S %Z")
+                            if datetime.now() - pub_datetime > timedelta(days=7):
+                                continue  # Skip old news
+                        except:
+                            pass  # If date parsing fails, include the headline anyway
+                    
+                    headlines.append(title.text)
+            
+            return headlines
+        return []
+    except Exception as e:
+        print(f"Error fetching news for {ticker}: {e}")
+        return []
+
+
 @st.cache_resource
 def load_engine():
     """Initialize and load data into the Portfolio Engine."""
@@ -107,6 +230,36 @@ def load_engine():
     
     eng.fetch_market_data()
     return eng
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_history(_engine):
+    """Cached wrapper for get_history to prevent repeated yfinance calls."""
+    return _engine.get_history(breakdown=True)
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes  
+def get_cached_timeframe_returns(_engine):
+    """Cached wrapper for get_timeframe_returns to prevent repeated yfinance calls."""
+    return _engine.get_timeframe_returns()
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_benchmark_comparison(_engine):
+    """Cached wrapper for get_benchmark_comparison to prevent repeated yfinance calls."""
+    return _engine.get_benchmark_comparison()
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_sp500_history(_engine, start_date):
+    """Cached wrapper for get_sp500_history to prevent repeated yfinance calls."""
+    return _engine.get_sp500_history(start_date=start_date)
+
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes (dividends change less frequently)
+def get_cached_dividend_data(_engine):
+    """Cached wrapper for get_dividend_data to prevent repeated yfinance calls."""
+    return _engine.get_dividend_data()
 
 
 def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
@@ -266,6 +419,59 @@ def render_holdings_tab(engine, history_df):
     
     holdings_df = holdings_df.sort_values('Market Value (USD)', ascending=False)
     
+    # Check if any tickers are using stale fallback data
+    stale_tickers = getattr(engine, 'stale_tickers', [])
+    if stale_tickers:
+        st.warning(f"⚠️ **Rate limited by Yahoo Finance.** The following tickers are using cached prices from Dec 14, 2025: {', '.join(stale_tickers)}. Prices and daily changes may be outdated.")
+    
+    # Check for significant movers (>3% daily change) and show explanation banners
+    if 'Daily Change (%)' in holdings_df.columns:
+        # Filter for valid significant movers:
+        # - Daily change >= 3% or <= -3%
+        # - Exclude 0% (no data / rate limited)
+        # - Exclude extreme values like -100% (data errors)
+        # - Exclude very small positions (< $100 value)
+        # - Exclude tickers using stale fallback data
+        valid_mask = (
+            (holdings_df['Daily Change (%)'].abs() >= 3.0) & 
+            (holdings_df['Daily Change (%)'].abs() < 50.0) &  # Filter out data errors
+            (holdings_df['Daily Change (%)'] != 0.0) &  # Filter out no-data
+            (holdings_df['Market Value (USD)'] >= 100.0) &  # Filter tiny positions
+            (~holdings_df['Ticker'].isin(stale_tickers))  # Exclude stale data tickers
+        )
+        significant_movers = holdings_df[valid_mask]
+        
+        if not significant_movers.empty:
+            st.markdown("#### 📊 Significant Movers Today")
+            
+            for _, row in significant_movers.iterrows():
+                ticker = row['Ticker']
+                change_pct = row['Daily Change (%)']
+                change_usd = row.get('Daily Change ($)', 0)
+                
+                # Only fetch news and call AI for valid significant movers
+                news = fetch_stock_news(ticker)
+                explanation = get_price_movement_explanation(ticker, change_pct, news)
+                
+                # Determine banner color
+                if change_pct >= 0:
+                    bg_color = "#d4edda"  # Light green
+                    border_color = "#28a745"  # Green
+                    icon = "📈"
+                else:
+                    bg_color = "#f8d7da"  # Light red
+                    border_color = "#dc3545"  # Red
+                    icon = "📉"
+                
+                st.markdown(f"""
+                <div style="background: {bg_color}; padding: 12px 16px; border-radius: 6px; border-left: 4px solid {border_color}; margin-bottom: 10px;">
+                    <strong>{icon} {ticker}</strong> &nbsp; <span style="color: {border_color}; font-weight: 600;">{change_pct:+.2f}%</span> (${change_usd:+,.2f})
+                    <br><span style="color: #333; font-size: 14px;">{explanation}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+    
     display_cols = [
         'Ticker', 'Net Shares', 'Price (Local)', 'Currency',
         'Market Value (USD)', 'Avg Cost', 'Unrealized PnL', 'PnL %',
@@ -314,25 +520,113 @@ def render_holdings_tab(engine, history_df):
     tickers = holdings_df['Ticker'].tolist()
     selected = st.selectbox("Select Position", tickers)
     
-    if selected and not history_df.empty and selected in history_df.columns:
+    if selected:
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            fig = px.line(
-                history_df,
-                x=history_df.index,
-                y=selected,
-                title=f'{selected} - Value History'
-            )
-            fig.update_layout(
-                height=280,
-                margin=dict(l=0, r=0, t=40, b=0),
-                xaxis_title='',
-                yaxis_title='Value (USD)',
-                yaxis_tickprefix='$'
-            )
-            fig.update_traces(line_color='#1976d2')
-            st.plotly_chart(fig, use_container_width=True)
+            # Timespan selection buttons
+            timespan_col1, timespan_col2, timespan_col3, timespan_col4 = st.columns(4)
+            
+            with timespan_col1:
+                btn_1m = st.button("1M", key="btn_1m", use_container_width=True)
+            with timespan_col2:
+                btn_6m = st.button("6M", key="btn_6m", use_container_width=True)
+            with timespan_col3:
+                btn_1y = st.button("1Y", key="btn_1y", use_container_width=True)
+            with timespan_col4:
+                btn_ytd = st.button("YTD", key="btn_ytd", use_container_width=True)
+            
+            # Determine selected period
+            if 'position_timespan' not in st.session_state:
+                st.session_state.position_timespan = '1y'
+            
+            if btn_1m:
+                st.session_state.position_timespan = '1mo'
+            elif btn_6m:
+                st.session_state.position_timespan = '6mo'
+            elif btn_1y:
+                st.session_state.position_timespan = '1y'
+            elif btn_ytd:
+                st.session_state.position_timespan = 'ytd'
+            
+            period = st.session_state.position_timespan
+            
+            # Fetch equity price history (using cached function)
+            with st.spinner(f"Loading {selected} price data..."):
+                price_history = fetch_equity_history(selected, period)
+            
+            if not price_history.empty:
+                # Get buy transactions to mark on chart
+                buy_transactions = engine.get_buy_transactions(selected)
+                
+                # Get currency for the ticker
+                pos_data = holdings_df[holdings_df['Ticker'] == selected].iloc[0]
+                currency = pos_data.get('Currency', 'USD')
+                currency_symbol = {'USD': '$', 'CAD': 'C$', 'JPY': '¥', 'GBP': '£'}.get(currency, '$')
+                
+                # Create the figure
+                fig = go.Figure()
+                
+                # Add price line
+                fig.add_trace(go.Scatter(
+                    x=price_history.index,
+                    y=price_history['Close'],
+                    mode='lines',
+                    name='Price',
+                    line=dict(color='#1976d2', width=2),
+                    hovertemplate=f'{currency_symbol}%{{y:.2f}}<extra></extra>'
+                ))
+                
+                # Add buy markers (green triangles)
+                if buy_transactions:
+                    chart_start = price_history.index.min()
+                    chart_end = price_history.index.max()
+                    
+                    for buy in buy_transactions:
+                        buy_date = buy['date']
+                        # Only show buys within the chart's date range
+                        if chart_start <= buy_date <= chart_end:
+                            buy_price = buy['price']
+                            buy_qty = buy['quantity']
+                            
+                            fig.add_trace(go.Scatter(
+                                x=[buy_date],
+                                y=[buy_price],
+                                mode='markers',
+                                name=f"Buy ({buy_date.strftime('%Y-%m-%d')})",
+                                marker=dict(
+                                    symbol='triangle-up',
+                                    size=14,
+                                    color='#2e7d32',
+                                    line=dict(width=1, color='white')
+                                ),
+                                hovertemplate=(
+                                    f"<b>BUY</b><br>"
+                                    f"Date: {buy_date.strftime('%Y-%m-%d')}<br>"
+                                    f"Price: {currency_symbol}{buy_price:.2f}<br>"
+                                    f"Qty: {buy_qty:,.0f}<extra></extra>"
+                                ),
+                                showlegend=False
+                            ))
+                
+                # Period label for title
+                period_labels = {'1mo': '1 Month', '6mo': '6 Months', '1y': '1 Year', 'ytd': 'Year to Date'}
+                period_label = period_labels.get(period, period)
+                
+                fig.update_layout(
+                    title=f'{selected} - Price History ({period_label})',
+                    height=320,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    xaxis_title='',
+                    yaxis_title=f'Price ({currency})',
+                    yaxis_tickprefix=currency_symbol,
+                    hovermode='x unified',
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info(f"Price history unavailable for {selected}")
         
         with col2:
             pos_data = holdings_df[holdings_df['Ticker'] == selected].iloc[0]
@@ -345,6 +639,16 @@ def render_holdings_tab(engine, history_df):
                 st.write(f"Weight: {pos_data['Weight (%)']:.1f}%")
             if 'Dividends Received' in pos_data:
                 st.write(f"Dividends: ${pos_data['Dividends Received']:,.2f}")
+            
+            # Show buy history summary
+            buy_transactions = engine.get_buy_transactions(selected)
+            if buy_transactions:
+                st.markdown("---")
+                st.markdown("**Purchase History**")
+                for buy in buy_transactions[-5:]:  # Show last 5 buys
+                    currency = buy['currency']
+                    currency_symbol = {'USD': '$', 'CAD': 'C$', 'JPY': '¥', 'GBP': '£'}.get(currency, '$')
+                    st.caption(f"{buy['date'].strftime('%Y-%m-%d')}: {buy['quantity']:,.0f} @ {currency_symbol}{buy['price']:.2f}")
 
 
 def render_analysis_tab(engine, history_df):
@@ -353,7 +657,7 @@ def render_analysis_tab(engine, history_df):
     # Benchmark Comparison
     st.subheader("Performance vs Benchmark")
     
-    benchmark = engine.get_benchmark_comparison()
+    benchmark = get_cached_benchmark_comparison(engine)
     
     if 'error' in benchmark:
         st.warning(f"Benchmark data unavailable: {benchmark['error']}")
@@ -377,7 +681,7 @@ def render_analysis_tab(engine, history_df):
     if not history_df.empty:
         start_dt = engine.INCEPTION_DATE.normalize() if hasattr(engine, "INCEPTION_DATE") else pd.Timestamp('2025-09-28')
         hist_slice = history_df[history_df.index >= start_dt]
-        spy_hist = engine.get_sp500_history(start_date=start_dt)
+        spy_hist = get_cached_sp500_history(engine, start_dt)
         
         chart_rendered = False
         
@@ -568,7 +872,7 @@ def render_dividends_tab(engine):
     st.subheader("Dividend Tracker")
     
     with st.spinner("Fetching dividend data..."):
-        div_data = engine.get_dividend_data()
+        div_data = get_cached_dividend_data(engine)
     
     # Summary metrics
     col1, col2, col3 = st.columns(3)
@@ -743,14 +1047,12 @@ def main():
     if not engine:
         return
     
-    try:
-        engine.fetch_market_data()
-    except Exception as e:
-        st.warning(f"Price refresh failed. ({e})")
+    # Note: fetch_market_data is already called in load_engine() which is cached
+    # Don't call it again here or it will cause rate limiting!
     
     valuation_data = engine.get_valuations()
-    history_df = engine.get_history(breakdown=True)
-    timeframe_returns = engine.get_timeframe_returns()
+    history_df = get_cached_history(engine)
+    timeframe_returns = get_cached_timeframe_returns(engine)
     
     tab_overview, tab_holdings, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Dividends", "Analysis"])
     
