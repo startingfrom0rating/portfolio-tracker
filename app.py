@@ -130,9 +130,14 @@ def get_price_movement_explanation(ticker, change_pct, news_headlines):
 Here are recent news headlines about this company:
 {news_text}
 
-Based on these headlines, provide a 1-2 sentence explanation for this price movement. If none of the headlines seem relevant to explaining the price change, respond with exactly: "There is no clear reason for this price movement."
+Based on these headlines, provide EXACTLY 3 concise sentences:
+1. What news/event likely caused this movement
+2. Brief context about the company or situation
+3. Market sentiment or outlook based on the news
 
-Be concise and factual."""
+If none of the headlines seem relevant to explaining the price change, respond with exactly: "There is no clear reason for this price movement."
+
+Be factual and specific. Do not use bullet points."""
 
     try:
         response = requests.post(
@@ -144,19 +149,20 @@ Be concise and factual."""
             json={
                 "model": "deepseek-chat",
                 "messages": [
-                    {"role": "system", "content": "You are a financial analyst assistant. Give brief, factual explanations for stock price movements."},
+                    {"role": "system", "content": "You are a financial analyst assistant. Provide concise 3-sentence explanations for stock price movements based on recent news. Be factual and specific."},
                     {"role": "user", "content": prompt}
                 ],
                 "stream": False,
-                "max_tokens": 100
+                "max_tokens": 200
             },
-            timeout=10
+            timeout=15
         )
         
         if response.status_code == 200:
             data = response.json()
             return data['choices'][0]['message']['content'].strip()
         else:
+            print(f"DeepSeek API returned status {response.status_code}: {response.text}")
             return "Unable to fetch explanation at this time."
     except Exception as e:
         print(f"DeepSeek API error: {e}")
@@ -165,48 +171,94 @@ Be concise and factual."""
 
 @st.cache_data(ttl=900)  # Cache for 15 minutes
 def fetch_stock_news(ticker):
-    """Fetch recent news headlines (last 7 days) for a ticker using web scraping."""
+    """Fetch recent news headlines for a ticker using multiple sources with fallback."""
     import requests
     from bs4 import BeautifulSoup
     from datetime import datetime, timedelta
+    import yfinance as yf
+    import time
     
+    headlines = []
+    fetch_source = None
+    
+    # Clean ticker for search (remove exchange suffixes like .T, .TO, .L)
+    clean_ticker = ticker.split('.')[0] if '.' in ticker else ticker
+    
+    # Try Google News RSS first
     try:
-        # Use Google News RSS feed for the ticker, filter to last 7 days
-        # Add "when:7d" to limit to last week
-        url = f"https://news.google.com/rss/search?q={ticker}+stock+when:7d&hl=en-US&gl=US&ceid=US:en"
+        url = f"https://news.google.com/rss/search?q={clean_ticker}+stock+when:7d&hl=en-US&gl=US&ceid=US:en"
         
-        response = requests.get(url, timeout=5, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'xml')
-            items = soup.find_all('item')[:5]
-            headlines = []
+        for attempt in range(2):  # Retry once on failure
+            response = requests.get(url, timeout=8, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            })
             
-            for item in items:
-                title = item.find('title')
-                pub_date = item.find('pubDate')
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'xml')
+                items = soup.find_all('item')[:5]
                 
-                if title:
-                    # Double check the date is within last 7 days
-                    if pub_date:
-                        try:
-                            # Parse the pubDate (format: "Tue, 21 Jan 2026 12:00:00 GMT")
-                            date_str = pub_date.text
-                            pub_datetime = datetime.strptime(date_str, "%a, %d %b %Y %H:%M:%S %Z")
-                            if datetime.now() - pub_datetime > timedelta(days=7):
-                                continue  # Skip old news
-                        except:
-                            pass  # If date parsing fails, include the headline anyway
+                for item in items:
+                    title = item.find('title')
+                    pub_date = item.find('pubDate')
                     
-                    headlines.append(title.text)
+                    if title:
+                        # Check the date is within last 7 days
+                        if pub_date:
+                            try:
+                                date_str = pub_date.text
+                                # Handle multiple date formats
+                                for fmt in ["%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S %z"]:
+                                    try:
+                                        pub_datetime = datetime.strptime(date_str.replace('GMT', '+0000'), fmt.replace('%Z', '%z'))
+                                        pub_datetime = pub_datetime.replace(tzinfo=None)
+                                        if datetime.now() - pub_datetime > timedelta(days=7):
+                                            continue
+                                        break
+                                    except:
+                                        continue
+                            except:
+                                pass  # Include headline if date parsing fails
+                        
+                        headlines.append(title.text)
+                
+                if headlines:
+                    fetch_source = "Google News"
+                    break
             
-            return headlines
-        return []
+            if attempt == 0:
+                time.sleep(0.5)  # Brief delay before retry
     except Exception as e:
-        print(f"Error fetching news for {ticker}: {e}")
-        return []
+        print(f"Google News error for {ticker}: {e}")
+    
+    # Fallback to yfinance news if Google News returned nothing
+    if not headlines:
+        try:
+            stock = yf.Ticker(ticker)
+            news = stock.news
+            if news:
+                for n in news[:5]:
+                    # Handle both old and new yfinance news structure
+                    title = None
+                    if isinstance(n, dict):
+                        # New structure: nested under 'content'
+                        if 'content' in n and isinstance(n['content'], dict):
+                            title = n['content'].get('title', '')
+                        # Old structure: direct 'title' key
+                        elif 'title' in n:
+                            title = n.get('title', '')
+                    if title:
+                        headlines.append(title)
+                if headlines:
+                    fetch_source = "Yahoo Finance"
+        except Exception as e:
+            print(f"yfinance news error for {ticker}: {e}")
+    
+    # Store fetch source for debugging (accessible via session state)
+    if 'news_fetch_sources' not in st.session_state:
+        st.session_state.news_fetch_sources = {}
+    st.session_state.news_fetch_sources[ticker] = fetch_source if headlines else "No articles found"
+    
+    return headlines
 
 
 @st.cache_resource
@@ -424,7 +476,7 @@ def render_holdings_tab(engine, history_df):
     if stale_tickers:
         st.warning(f"⚠️ **Rate limited by Yahoo Finance.** The following tickers are using cached prices from Dec 14, 2025: {', '.join(stale_tickers)}. Prices and daily changes may be outdated.")
     
-    # Check for significant movers (>3% daily change) and show explanation banners
+    # Store significant movers data for the Summary tab (don't render inline)
     if 'Daily Change (%)' in holdings_df.columns:
         # Filter for valid significant movers:
         # - Daily change >= 3% or <= -3%
@@ -441,36 +493,14 @@ def render_holdings_tab(engine, history_df):
         )
         significant_movers = holdings_df[valid_mask]
         
+        # Store in session state for the Summary tab
+        st.session_state.significant_movers = significant_movers
+        st.session_state.stale_tickers = stale_tickers
+        
+        # Show a brief indicator if there are significant movers
         if not significant_movers.empty:
-            st.markdown("#### 📊 Significant Movers Today")
-            
-            for _, row in significant_movers.iterrows():
-                ticker = row['Ticker']
-                change_pct = row['Daily Change (%)']
-                change_usd = row.get('Daily Change ($)', 0)
-                
-                # Only fetch news and call AI for valid significant movers
-                news = fetch_stock_news(ticker)
-                explanation = get_price_movement_explanation(ticker, change_pct, news)
-                
-                # Determine banner color
-                if change_pct >= 0:
-                    bg_color = "#d4edda"  # Light green
-                    border_color = "#28a745"  # Green
-                    icon = "📈"
-                else:
-                    bg_color = "#f8d7da"  # Light red
-                    border_color = "#dc3545"  # Red
-                    icon = "📉"
-                
-                st.markdown(f"""
-                <div style="background: {bg_color}; padding: 12px 16px; border-radius: 6px; border-left: 4px solid {border_color}; margin-bottom: 10px;">
-                    <strong>{icon} {ticker}</strong> &nbsp; <span style="color: {border_color}; font-weight: 600;">{change_pct:+.2f}%</span> (${change_usd:+,.2f})
-                    <br><span style="color: #333; font-size: 14px;">{explanation}</span>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
+            mover_count = len(significant_movers)
+            st.info(f"📊 **{mover_count} significant mover(s) today** — View AI analysis in the **Summary** tab")
     
     display_cols = [
         'Ticker', 'Net Shares', 'Price (Local)', 'Currency',
@@ -867,6 +897,93 @@ def render_analysis_tab(engine, history_df):
             st.plotly_chart(fig, use_container_width=True)
 
 
+def render_summary_tab():
+    """Render the AI Summary tab with significant movers analysis."""
+    st.subheader("📊 AI Market Summary")
+    st.caption("DeepSeek-powered analysis of significant price movements (≥3% daily change)")
+    
+    # Get significant movers from session state (populated by holdings tab)
+    significant_movers = st.session_state.get('significant_movers', pd.DataFrame())
+    
+    if significant_movers is None or (isinstance(significant_movers, pd.DataFrame) and significant_movers.empty):
+        st.info("No significant movers today (positions with ≥3% daily change and ≥$100 value).")
+        return
+    
+    st.markdown("---")
+    
+    # Process each significant mover
+    for idx, (_, row) in enumerate(significant_movers.iterrows()):
+        ticker = row['Ticker']
+        change_pct = row['Daily Change (%)']
+        change_usd = row.get('Daily Change ($)', 0)
+        market_value = row.get('Market Value (USD)', 0)
+        
+        # Fetch news and get AI explanation
+        news = fetch_stock_news(ticker)
+        explanation = get_price_movement_explanation(ticker, change_pct, news)
+        
+        # Get news source info for debugging
+        news_sources = st.session_state.get('news_fetch_sources', {})
+        news_source = news_sources.get(ticker, "Unknown")
+        
+        # Determine styling
+        if change_pct >= 0:
+            bg_color = "#d4edda"
+            border_color = "#1acc44"
+            icon = "📈"
+            direction = "up"
+        else:
+            bg_color = "#f8d7da"
+            border_color = "#f7142b"
+            icon = "📉"
+            direction = "down"
+        
+        # Render the analysis card
+        st.markdown(f"""
+        <div style="background: {bg_color}; padding: 16px 20px; border-radius: 8px; border-left: 5px solid {border_color}; margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="font-size: 18px; font-weight: 600;">{icon} {ticker}</span>
+                <span style="color: {border_color}; font-weight: 700; font-size: 16px;">{change_pct:+.2f}%</span>
+            </div>
+            <div style="color: #555; font-size: 13px; margin-bottom: 10px;">
+                Daily P&L: <strong>${change_usd:+,.2f}</strong> &nbsp;|&nbsp; Position Value: <strong>${market_value:,.2f}</strong>
+            </div>
+            <div style="color: #333; font-size: 14px; line-height: 1.5;">
+                {explanation}
+            </div>
+            <div style="color: #888; font-size: 11px; margin-top: 8px;">
+                News source: {news_source} ({len(news)} article(s) found)
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Show summary statistics
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    
+    gainers = significant_movers[significant_movers['Daily Change (%)'] > 0]
+    losers = significant_movers[significant_movers['Daily Change (%)'] < 0]
+    
+    with col1:
+        st.metric("Total Significant Movers", len(significant_movers))
+    with col2:
+        st.metric("Gainers (≥3%)", len(gainers), delta=f"+{len(gainers)}" if len(gainers) > 0 else None)
+    with col3:
+        st.metric("Losers (≤-3%)", len(losers), delta=f"-{len(losers)}" if len(losers) > 0 else None, delta_color="inverse")
+    
+    # Debug info expander
+    with st.expander("🔍 Debug Info (News Fetch Status)"):
+        news_sources = st.session_state.get('news_fetch_sources', {})
+        if news_sources:
+            debug_df = pd.DataFrame([
+                {"Ticker": t, "News Source": s} 
+                for t, s in news_sources.items()
+            ])
+            st.dataframe(debug_df, use_container_width=True, hide_index=True)
+        else:
+            st.write("No news fetch data available.")
+
+
 def render_dividends_tab(engine):
     """Render the Dividends tab."""
     st.subheader("Dividend Tracker")
@@ -1054,13 +1171,16 @@ def main():
     history_df = get_cached_history(engine)
     timeframe_returns = get_cached_timeframe_returns(engine)
     
-    tab_overview, tab_holdings, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Dividends", "Analysis"])
+    tab_overview, tab_holdings, tab_summary, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Summary", "Dividends", "Analysis"])
     
     with tab_overview:
         render_overview_tab(engine, valuation_data, history_df, timeframe_returns)
     
     with tab_holdings:
         render_holdings_tab(engine, history_df)
+    
+    with tab_summary:
+        render_summary_tab()
     
     with tab_dividends:
         render_dividends_tab(engine)
