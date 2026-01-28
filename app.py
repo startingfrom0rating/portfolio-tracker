@@ -113,7 +113,7 @@ def fetch_equity_history(ticker, period):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=900)  # Cache for 15 minutes to avoid repeated API calls
+@st.cache_data(ttl=86400)  # Cache for 24 hours to minimize API token usage
 def get_price_movement_explanation(ticker, change_pct, news_headlines):
     """Call DeepSeek API to explain a significant price movement."""
     import requests
