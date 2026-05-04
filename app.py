@@ -5,6 +5,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import os
+import hashlib
+import tempfile
+from dotenv import load_dotenv
 from portfolio_engine import PortfolioEngine
 
 try:
@@ -60,7 +63,18 @@ st.markdown("""
 TRANSACTION_FILE = "attachment;filename=TransactionHistory_12_13_2025.csv"
 OPEN_POSITION_FILE = "attachment;filename=OpenPosition_12_14_2025.csv"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEEPSEEK_API_KEY = "sk-c2ea695f9fa340379cbc1321502b639d"
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+
+def get_deepseek_api_key():
+    """Fetch DeepSeek API key from env or Streamlit secrets."""
+    key = os.getenv("DEEPSEEK_API_KEY")
+    if key:
+        return key
+    try:
+        return st.secrets.get("DEEPSEEK_API_KEY")
+    except Exception:
+        return None
 
 
 def as_float(x, default=0.0):
@@ -85,6 +99,42 @@ def _robust_symmetric_range(values, fallback=1.0, q=0.95):
         return max(hi, float(fallback))
     except Exception:
         return float(fallback)
+
+
+def get_file_signature(path):
+    """Generate a lightweight signature for a local file to bust caches."""
+    try:
+        stat = os.stat(path)
+        return f"{path}:{stat.st_size}:{int(stat.st_mtime)}"
+    except Exception:
+        return path or "missing"
+
+
+def save_uploaded_file(uploaded_file, key_prefix):
+    """Persist uploaded file to a temp path and return (path, signature, name)."""
+    if uploaded_file is None:
+        return None, None, None
+
+    data = uploaded_file.getvalue()
+    signature = hashlib.sha256(data).hexdigest()
+    sig_key = f"{key_prefix}_signature"
+    path_key = f"{key_prefix}_path"
+    name_key = f"{key_prefix}_name"
+
+    if st.session_state.get(sig_key) != signature:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+        tmp.write(data)
+        tmp.flush()
+        tmp.close()
+        st.session_state[sig_key] = signature
+        st.session_state[path_key] = tmp.name
+        st.session_state[name_key] = uploaded_file.name
+
+    return (
+        st.session_state.get(path_key),
+        st.session_state.get(sig_key),
+        st.session_state.get(name_key),
+    )
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -114,10 +164,17 @@ def fetch_equity_history(ticker, period):
 
 
 @st.cache_data(ttl=86400)  # Cache for 24 hours to minimize API token usage
-def get_price_movement_explanation(ticker, change_pct, news_headlines):
+def get_price_movement_explanation(ticker, change_pct, news_headlines, enable_ai=True):
     """Call DeepSeek API to explain a significant price movement."""
     import requests
-    
+
+    if not enable_ai:
+        return "AI summary disabled. Add DEEPSEEK_API_KEY to enable this insight."
+
+    api_key = get_deepseek_api_key()
+    if not api_key:
+        return "AI summary disabled. Add DEEPSEEK_API_KEY to enable this insight."
+
     if not news_headlines:
         return "There is no clear reason for this price movement."
     
@@ -144,7 +201,7 @@ Be factual and specific. Do not use bullet points."""
             "https://api.deepseek.com/chat/completions",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+                "Authorization": f"Bearer {api_key}"
             },
             json={
                 "model": "deepseek-chat",
@@ -262,7 +319,7 @@ def fetch_stock_news(ticker):
 
 
 @st.cache_resource
-def load_engine():
+def load_engine(transaction_path, open_position_path=None, cache_buster=None):
     """Initialize and load data into the Portfolio Engine."""
     # Force reload of the module to ensure latest code is used (e.g. new methods)
     import portfolio_engine
@@ -270,10 +327,7 @@ def load_engine():
     importlib.reload(portfolio_engine)
     from portfolio_engine import PortfolioEngine
     
-    path1 = os.path.join(BASE_DIR, TRANSACTION_FILE)
-    path2 = os.path.join(BASE_DIR, OPEN_POSITION_FILE)
-    
-    eng = PortfolioEngine(path1, path2)
+    eng = PortfolioEngine(transaction_path, open_position_path)
     success = eng.load_data()
     
     if not success:
@@ -312,6 +366,42 @@ def get_cached_sp500_history(_engine, start_date):
 def get_cached_dividend_data(_engine):
     """Cached wrapper for get_dividend_data to prevent repeated yfinance calls."""
     return _engine.get_dividend_data()
+
+
+def calculate_risk_metrics(history_df, risk_free_rate=0.0):
+    """Compute risk metrics and drawdown series from portfolio history."""
+    if history_df is None or history_df.empty or 'Total' not in history_df.columns:
+        return None
+
+    total = history_df['Total'].dropna()
+    if len(total) < 2:
+        return None
+
+    daily_returns = total.pct_change().dropna()
+    if daily_returns.empty:
+        return None
+
+    days = (total.index[-1] - total.index[0]).days
+    if days <= 0:
+        return None
+
+    cagr = (total.iloc[-1] / total.iloc[0]) ** (365 / days) - 1
+    vol = daily_returns.std() * np.sqrt(252)
+    sharpe = (cagr - risk_free_rate) / vol if vol and vol > 0 else np.nan
+
+    running_max = total.cummax()
+    drawdown = (total / running_max) - 1.0
+    max_drawdown = drawdown.min()
+
+    return {
+        'cagr': cagr,
+        'volatility': vol,
+        'sharpe': sharpe,
+        'max_drawdown': max_drawdown,
+        'drawdown_series': drawdown,
+        'best_day': daily_returns.max(),
+        'worst_day': daily_returns.min(),
+    }
 
 
 def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
@@ -395,6 +485,15 @@ def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
         )
         fig_hist.update_traces(line_color='#1976d2')
         st.plotly_chart(fig_hist, use_container_width=True)
+
+        export_df = history_df.reset_index().rename(columns={'index': 'Date'})
+        csv_history = export_df.to_csv(index=False)
+        st.download_button(
+            "Download portfolio history (CSV)",
+            csv_history,
+            file_name="portfolio_history.csv",
+            mime="text/csv"
+        )
     
     st.markdown("---")
     
@@ -541,6 +640,14 @@ def render_holdings_tab(engine, history_df):
         pass
     
     st.dataframe(styler, use_container_width=True, height=500, hide_index=True)
+
+    csv_holdings = holdings_df.to_csv(index=False)
+    st.download_button(
+        "Download holdings (CSV)",
+        csv_holdings,
+        file_name="holdings.csv",
+        mime="text/csv"
+    )
     
     st.markdown("---")
     
@@ -681,7 +788,7 @@ def render_holdings_tab(engine, history_df):
                     st.caption(f"{buy['date'].strftime('%Y-%m-%d')}: {buy['quantity']:,.0f} @ {currency_symbol}{buy['price']:.2f}")
 
 
-def render_analysis_tab(engine, history_df):
+def render_analysis_tab(engine, history_df, risk_free_rate):
     """Render the Analysis tab."""
     
     # Benchmark Comparison
@@ -767,6 +874,49 @@ def render_analysis_tab(engine, history_df):
         if not chart_rendered:
             st.info("Benchmark chart unavailable - insufficient data.")
     
+    st.markdown("---")
+
+    # Risk & Drawdown
+    st.subheader("Risk & Drawdown")
+    risk_metrics = calculate_risk_metrics(history_df, risk_free_rate=risk_free_rate)
+
+    if risk_metrics:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("CAGR", f"{risk_metrics['cagr'] * 100:.2f}%")
+        col2.metric("Volatility", f"{risk_metrics['volatility'] * 100:.2f}%")
+
+        sharpe_val = risk_metrics['sharpe']
+        sharpe_text = f"{sharpe_val:.2f}" if np.isfinite(sharpe_val) else "N/A"
+        col3.metric("Sharpe", sharpe_text)
+        col4.metric("Max Drawdown", f"{risk_metrics['max_drawdown'] * 100:.2f}%")
+
+        dd = risk_metrics['drawdown_series'] * 100
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(
+            x=dd.index,
+            y=dd.values,
+            name='Drawdown',
+            line=dict(color='#c62828', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(198, 40, 40, 0.15)'
+        ))
+        fig_dd.update_layout(
+            height=260,
+            margin=dict(l=0, r=0, t=20, b=0),
+            yaxis_title='Drawdown (%)',
+            xaxis_title='',
+            yaxis=dict(ticksuffix='%'),
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+        st.caption(
+            f"Best day: {risk_metrics['best_day'] * 100:+.2f}% | "
+            f"Worst day: {risk_metrics['worst_day'] * 100:+.2f}%"
+        )
+    else:
+        st.info("Risk metrics unavailable - insufficient history.")
+
     st.markdown("---")
     
     # Daily Performance
@@ -901,6 +1051,10 @@ def render_summary_tab():
     """Render the AI Summary tab with significant movers analysis."""
     st.subheader("📊 AI Market Summary")
     st.caption("DeepSeek-powered analysis of significant price movements (≥3% daily change)")
+
+    api_key_present = bool(get_deepseek_api_key())
+    if not api_key_present:
+        st.warning("AI summary is disabled. Add DEEPSEEK_API_KEY to .env or Streamlit secrets to enable.")
     
     # Get significant movers from session state (populated by holdings tab)
     significant_movers = st.session_state.get('significant_movers', pd.DataFrame())
@@ -920,7 +1074,7 @@ def render_summary_tab():
         
         # Fetch news and get AI explanation
         news = fetch_stock_news(ticker)
-        explanation = get_price_movement_explanation(ticker, change_pct, news)
+        explanation = get_price_movement_explanation(ticker, change_pct, news, enable_ai=api_key_present)
         
         # Get news source info for debugging
         news_sources = st.session_state.get('news_fetch_sources', {})
@@ -938,6 +1092,16 @@ def render_summary_tab():
             icon = "📉"
             direction = "down"
         
+        headline_block = ""
+        if not api_key_present and news:
+            headlines_html = "".join([f"<li>{h}</li>" for h in news[:3]])
+            headline_block = (
+                "<div style='margin-top: 8px; color: #444; font-size: 13px;'>"
+                "<strong>Recent headlines</strong>"
+                f"<ul style='margin: 6px 0 0 18px;'>{headlines_html}</ul>"
+                "</div>"
+            )
+
         # Render the analysis card
         st.markdown(f"""
         <div style="background: {bg_color}; padding: 16px 20px; border-radius: 8px; border-left: 5px solid {border_color}; margin-bottom: 16px;">
@@ -951,6 +1115,7 @@ def render_summary_tab():
             <div style="color: #333; font-size: 14px; line-height: 1.5;">
                 {explanation}
             </div>
+            {headline_block}
             <div style="color: #888; font-size: 11px; margin-top: 8px;">
                 News source: {news_source} ({len(news)} article(s) found)
             </div>
@@ -1147,6 +1312,27 @@ def main():
 
     with st.sidebar:
         st.caption("Auto-refresh: 3 min")
+        st.markdown("### Data source")
+        data_mode = st.radio(
+            "Select data input",
+            ["Use default CSVs", "Upload CSVs"],
+            index=0
+        )
+        uploaded_txn = None
+        uploaded_open = None
+        if data_mode == "Upload CSVs":
+            uploaded_txn = st.file_uploader("Transaction history CSV", type=["csv"], key="txn_upload")
+            uploaded_open = st.file_uploader("Open positions CSV (optional)", type=["csv"], key="open_upload")
+
+        st.markdown("### Analytics")
+        risk_free_rate_pct = st.number_input(
+            "Risk-free rate (annual, %)",
+            min_value=0.0,
+            max_value=10.0,
+            value=4.0,
+            step=0.25
+        )
+
         if st.button("Clear cache & reload"):
             try:
                 st.cache_data.clear()
@@ -1157,9 +1343,34 @@ def main():
             except Exception:
                 pass
             st.rerun()
+
+    if data_mode == "Upload CSVs" and uploaded_txn is None:
+        st.info("Upload a transaction CSV to load your portfolio.")
+        return
+
+    if uploaded_txn is not None:
+        txn_path, txn_sig, txn_name = save_uploaded_file(uploaded_txn, "txn")
+    else:
+        txn_path = os.path.join(BASE_DIR, TRANSACTION_FILE)
+        txn_sig = get_file_signature(txn_path)
+        txn_name = os.path.basename(txn_path)
+
+    if uploaded_open is not None:
+        open_path, open_sig, open_name = save_uploaded_file(uploaded_open, "open")
+    else:
+        default_open = os.path.join(BASE_DIR, OPEN_POSITION_FILE)
+        open_path = default_open if os.path.exists(default_open) else None
+        open_sig = get_file_signature(default_open) if open_path else "none"
+        open_name = os.path.basename(default_open) if open_path else "None"
+
+    risk_free_rate = risk_free_rate_pct / 100
+
+    if not txn_path or not os.path.exists(txn_path):
+        st.error("Transaction CSV not found. Please upload a file or verify the default path.")
+        return
     
     with st.spinner("Loading..."):
-        engine = load_engine()
+        engine = load_engine(txn_path, open_path, (txn_sig, open_sig))
     
     if not engine:
         return
@@ -1170,6 +1381,23 @@ def main():
     valuation_data = engine.get_valuations()
     history_df = get_cached_history(engine)
     timeframe_returns = get_cached_timeframe_returns(engine)
+
+    with st.sidebar:
+        st.markdown("### Data status")
+        st.caption(f"Transactions: {txn_name}")
+        st.caption(f"Open positions: {open_name}")
+        if history_df is not None and not history_df.empty:
+            st.write(f"History through: {history_df.index.max().strftime('%Y-%m-%d')}")
+        st.write(f"Last refresh: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+
+        stale = getattr(engine, 'stale_tickers', [])
+        if stale:
+            st.warning(f"Stale prices: {len(stale)} ({', '.join(stale)})")
+        else:
+            st.caption("No stale prices detected.")
+
+        with st.expander("FX rates used"):
+            st.write(engine.fx_rates)
     
     tab_overview, tab_holdings, tab_summary, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Summary", "Dividends", "Analysis"])
     
@@ -1186,7 +1414,7 @@ def main():
         render_dividends_tab(engine)
     
     with tab_analysis:
-        render_analysis_tab(engine, history_df)
+        render_analysis_tab(engine, history_df, risk_free_rate)
     
     # Footer
     st.markdown("---")
