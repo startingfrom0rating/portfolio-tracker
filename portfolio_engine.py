@@ -9,6 +9,17 @@ class PortfolioEngine:
     INITIAL_CAPITAL = 500000.0
     TOTAL_COMMISSIONS = 985.00  # Total commissions paid
     INCEPTION_DATE = pd.Timestamp('2025-09-28')
+    REQUIRED_TRANSACTION_COLUMNS = {
+        'Symbol',
+        'Exchange',
+        'Currency',
+        'CreateDate',
+        'TransactionType',
+        'Quantity',
+        'Price',
+        'Amount'
+    }
+    REQUIRED_OPEN_POSITION_COLUMNS = {'Symbol', 'Currency', 'LastPrice'}
     
     def __init__(self, transaction_file, open_position_file=None):
         self.transaction_file = transaction_file
@@ -22,11 +33,13 @@ class PortfolioEngine:
         self.market_data = {}
         self.fallback_prices = {} # {symbol: price (USD)}
         self.errors = []
+        self.warnings = []
         self.total_dividends = 0.0  # Track total dividends received
         self.dividend_by_ticker = {}  # {ticker: total_dividends_usd}
         self.FORCE_FALLBACK = ['B-T-6.250-15052030']
         self._history_cache = None  # Cache for history data
         self._sp500_cache = None  # Cache for S&P 500 data
+        self._benchmark_cache = {}
 
     def clean_currency(self, val):
         """Removes currency symbols and converts to float."""
@@ -65,21 +78,50 @@ class PortfolioEngine:
         # Fallback
         return symbol
 
+    def _require_columns(self, df, required_cols, label, fatal=True):
+        """Validate required columns exist in a dataframe."""
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            msg = f"{label} missing columns: {', '.join(missing)}"
+            if fatal:
+                self.errors.append(msg)
+            else:
+                self.warnings.append(msg)
+            return False
+        return True
+
     def load_data(self):
         """Loads and processes the transaction history."""
         try:
+            self.errors = []
+            self.warnings = []
             df = pd.read_csv(self.transaction_file)
+
+            if not self._require_columns(df, self.REQUIRED_TRANSACTION_COLUMNS, "Transaction history", fatal=True):
+                return False
+
+            # Normalize core columns with safe defaults
+            if 'FXRate' not in df.columns:
+                df['FXRate'] = 1.0
+                self.warnings.append("Transaction history missing FXRate; defaulted to 1.0.")
+            df['Currency'] = df['Currency'].fillna('USD')
+            df['Exchange'] = df['Exchange'].fillna('US')
+            df['TransactionType'] = df['TransactionType'].fillna('')
+            df['Symbol'] = df['Symbol'].fillna('')
             
             # Clean numeric columns
             df['Quantity'] = df['Quantity'].apply(self.clean_currency)
             df['Amount'] = df['Amount'].apply(self.clean_currency)
             df['Price'] = df['Price'].apply(self.clean_currency)
+            df['FXRate'] = pd.to_numeric(df['FXRate'], errors='coerce').fillna(1.0)
             
             # Map Tickers
             df['YF_Ticker'] = df.apply(self.get_yf_ticker, axis=1)
 
             # Ensure CreateDate is datetime
             df['CreateDate'] = pd.to_datetime(df['CreateDate'], errors='coerce')
+            if df['CreateDate'].isna().any():
+                self.warnings.append("Some transactions have invalid CreateDate values and may be skipped in time-based views.")
             
             self.transactions = df
             
@@ -90,6 +132,8 @@ class PortfolioEngine:
             if self.open_position_file and os.path.exists(self.open_position_file):
                 try:
                     odf = pd.read_csv(self.open_position_file)
+                    if not self._require_columns(odf, self.REQUIRED_OPEN_POSITION_COLUMNS, "Open positions", fatal=False):
+                        return True
                     # Create map: Symbol -> LastPrice
                     # Note: OpenPosition prices might be in local currency?
                     # Check HWC: PricePaid 63.06 (GBP), LastPrice 63.28 (USD/GBP?).
@@ -101,8 +145,8 @@ class PortfolioEngine:
                     # OpenPosition columns: Symbol, Quantity, Currency, LastPrice...
                     for _, row in odf.iterrows():
                         sym = str(row['Symbol']).strip()
-                        price = float(str(row['LastPrice']).replace(',','').replace('$',''))
-                        curr = str(row['Currency']).strip()
+                        price = self.clean_currency(row.get('LastPrice', 0.0))
+                        curr = str(row.get('Currency', 'USD')).strip()
                         self.fallback_prices[sym] = {'Price': price, 'Currency': curr}
                         # Also map the YF ticker mapping to this symbol if possible
                         yf_tk = self.get_yf_ticker({'Symbol': sym, 'Exchange':'', 'Currency':curr})
@@ -110,7 +154,7 @@ class PortfolioEngine:
                             self.fallback_prices[yf_tk] = {'Price': price, 'Currency': curr}
 
                 except Exception as e:
-                    print(f"Warning loading open positions: {e}")
+                    self.warnings.append(f"Open positions load warning: {e}")
             
             return True
         except Exception as e:
@@ -423,6 +467,59 @@ class PortfolioEngine:
             'total_value': total_portfolio
         }
 
+    def get_currency_exposure(self, include_cash=True):
+        """Return market value exposure by currency in USD terms."""
+        vals = self.get_valuations()
+        positions = vals['positions']
+
+        if positions is None or positions.empty:
+            return pd.DataFrame()
+
+        exposure = (
+            positions
+            .assign(Currency=positions['Currency'].fillna('Unknown'))
+            .groupby('Currency', as_index=False)['Market Value (USD)']
+            .sum()
+        )
+
+        if include_cash and vals.get('cash', 0) != 0:
+            exposure = pd.concat([
+                exposure,
+                pd.DataFrame([{'Currency': 'USD', 'Market Value (USD)': vals['cash']}])
+            ], ignore_index=True)
+
+        total = exposure['Market Value (USD)'].sum()
+        if total > 0:
+            exposure['Weight (%)'] = exposure['Market Value (USD)'] / total * 100
+        else:
+            exposure['Weight (%)'] = 0.0
+
+        return exposure.sort_values('Market Value (USD)', ascending=False)
+
+    def get_concentration_metrics(self, top_n=5):
+        """Return concentration metrics for the portfolio."""
+        vals = self.get_valuations()
+        positions = vals['positions']
+        total_value = vals.get('total_value', 0.0)
+
+        if positions is None or positions.empty or total_value <= 0:
+            return {}
+
+        positions = positions.copy()
+        positions['Weight (%)'] = positions['Market Value (USD)'] / total_value * 100
+
+        top = positions.sort_values('Weight (%)', ascending=False).head(top_n)
+        weights = positions['Weight (%)'] / 100
+        hhi = float((weights ** 2).sum())
+        effective_n = float(1 / hhi) if hhi > 0 else None
+
+        return {
+            'top_holdings': top,
+            'top_weight': float(top['Weight (%)'].sum()),
+            'hhi': hhi,
+            'effective_n': effective_n
+        }
+
     def get_history(self, breakdown=False):
         """Calculates historical portfolio value. 
            If breakdown=True, returns DataFrame with columns for each asset.
@@ -630,15 +727,20 @@ class PortfolioEngine:
         self._history_cache[cache_key] = history_df
         return history_df
 
-    def get_sp500_history(self, start_date=None, end_date=None):
-        """Fetch benchmark history using SPY (S&P 500 ETF) as the reference."""
+    def get_benchmark_history(self, ticker, start_date=None, end_date=None):
+        """Fetch benchmark history using the provided ticker."""
         if start_date is None:
             start_date = self.INCEPTION_DATE
         if end_date is None:
             end_date = pd.Timestamp.now()
 
+        if not ticker:
+            return pd.Series()
+
+        ticker = str(ticker).upper().strip()
+
         # Best-effort cache to reduce repeated yfinance calls on Streamlit reruns.
-        cache = getattr(self, '_sp500_cache', None)
+        cache = self._benchmark_cache.get(ticker)
         if cache:
             try:
                 cached_series, cached_start, cached_end = cache
@@ -648,50 +750,47 @@ class PortfolioEngine:
                         return sl
             except Exception:
                 pass
-        
+
         try:
-            # Use SPY as a liquid proxy for S&P 500 growth.
             raw = yf.download(
-                'SPY',
+                ticker,
                 start=start_date,
                 end=end_date + pd.Timedelta(days=1),
                 progress=False,
             )
-            
-            # Handle various yfinance return formats robustly
-            sp500 = pd.Series(dtype=float)
-            
+
+            benchmark = pd.Series(dtype=float)
+
             if isinstance(raw, pd.DataFrame):
-                # yfinance may return MultiIndex columns like ('Close', 'SPY')
                 if isinstance(raw.columns, pd.MultiIndex):
-                    # Flatten and find Close
                     if 'Close' in raw.columns.get_level_values(0):
-                        sp500 = raw['Close'].iloc[:, 0] if isinstance(raw['Close'], pd.DataFrame) else raw['Close']
+                        benchmark = raw['Close'].iloc[:, 0] if isinstance(raw['Close'], pd.DataFrame) else raw['Close']
                     elif 'Adj Close' in raw.columns.get_level_values(0):
-                        sp500 = raw['Adj Close'].iloc[:, 0] if isinstance(raw['Adj Close'], pd.DataFrame) else raw['Adj Close']
+                        benchmark = raw['Adj Close'].iloc[:, 0] if isinstance(raw['Adj Close'], pd.DataFrame) else raw['Adj Close']
                 else:
-                    # Normal columns
                     if 'Close' in raw.columns:
-                        sp500 = raw['Close']
+                        benchmark = raw['Close']
                     elif 'Adj Close' in raw.columns:
-                        sp500 = raw['Adj Close']
-            
-            # Ensure it's a Series
-            if isinstance(sp500, pd.DataFrame):
-                sp500 = sp500.iloc[:, 0]
-            
-            # Normalize index to midnight for alignment with our daily history index
-            if not sp500.empty:
-                sp500.index = pd.to_datetime(sp500.index).normalize()
+                        benchmark = raw['Adj Close']
+
+            if isinstance(benchmark, pd.DataFrame):
+                benchmark = benchmark.iloc[:, 0]
+
+            if not benchmark.empty:
+                benchmark.index = pd.to_datetime(benchmark.index).normalize()
 
             try:
-                self._sp500_cache = (sp500, sp500.index.min(), sp500.index.max())
+                self._benchmark_cache[ticker] = (benchmark, benchmark.index.min(), benchmark.index.max())
             except Exception:
                 pass
-            return sp500
+            return benchmark
         except Exception as e:
-            print(f"Error fetching SPY benchmark: {e}")
+            print(f"Error fetching benchmark {ticker}: {e}")
             return pd.Series()
+
+    def get_sp500_history(self, start_date=None, end_date=None):
+        """Fetch benchmark history using SPY (S&P 500 ETF) as the reference."""
+        return self.get_benchmark_history('SPY', start_date=start_date, end_date=end_date)
 
     def get_timeframe_returns(self):
         """Calculate returns over multiple timeframes with commission adjustment."""
@@ -752,20 +851,20 @@ class PortfolioEngine:
         
         return results
 
-    def get_benchmark_comparison(self):
-        """Compare portfolio performance vs SPY since Sep 28, 2025."""
+    def get_benchmark_comparison(self, benchmark_ticker='SPY'):
+        """Compare portfolio performance vs a benchmark since Sep 28, 2025."""
         history = self.get_history(breakdown=True)
         if history.empty:
             return {}
         
-        sp500 = self.get_sp500_history(start_date=self.INCEPTION_DATE)
-        if sp500 is None or getattr(sp500, 'empty', True):
-            return {'error': 'Could not fetch S&P 500 data'}
+        benchmark = self.get_benchmark_history(benchmark_ticker, start_date=self.INCEPTION_DATE)
+        if benchmark is None or getattr(benchmark, 'empty', True):
+            return {'error': f'Could not fetch benchmark data for {benchmark_ticker}'}
 
         # Align on normalized daily dates and since inception date
         start_dt = self.INCEPTION_DATE.normalize()
         hist_slice = history[history.index >= start_dt]
-        sp_slice = sp500[sp500.index >= start_dt]
+        sp_slice = benchmark[benchmark.index >= start_dt]
 
         common_dates = hist_slice.index.intersection(sp_slice.index)
         if len(common_dates) < 2:
@@ -786,12 +885,13 @@ class PortfolioEngine:
 
         return {
             'portfolio_return': float(port_return),
-            'sp500_return': float(sp_return),
+            'benchmark_return': float(sp_return),
             'excess_return': float(excess_return),
             'portfolio_start': float(port_start),
             'portfolio_end': float(port_end),
-            'sp500_start': float(sp_start),
-            'sp500_end': float(sp_end),
+            'benchmark_start': float(sp_start),
+            'benchmark_end': float(sp_end),
+            'benchmark_ticker': str(benchmark_ticker).upper(),
             'start_date': start_date,
             'end_date': end_date
         }

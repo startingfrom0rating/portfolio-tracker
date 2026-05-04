@@ -147,14 +147,14 @@ def fetch_equity_history(ticker, period):
             hist = yf.download(ticker, start=start_date, progress=False)
         else:
             hist = yf.download(ticker, period=period, progress=False)
-        
+
         if hist.empty:
             return pd.DataFrame()
-        
+
         # Handle multi-level columns from yf.download
         if isinstance(hist.columns, pd.MultiIndex):
             hist.columns = hist.columns.get_level_values(0)
-        
+
         result = hist[['Close']].copy()
         result.index = pd.to_datetime(result.index).tz_localize(None)
         return result
@@ -351,15 +351,15 @@ def get_cached_timeframe_returns(_engine):
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_cached_benchmark_comparison(_engine):
+def get_cached_benchmark_comparison(_engine, benchmark_ticker):
     """Cached wrapper for get_benchmark_comparison to prevent repeated yfinance calls."""
-    return _engine.get_benchmark_comparison()
+    return _engine.get_benchmark_comparison(benchmark_ticker)
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_cached_sp500_history(_engine, start_date):
-    """Cached wrapper for get_sp500_history to prevent repeated yfinance calls."""
-    return _engine.get_sp500_history(start_date=start_date)
+def get_cached_benchmark_history(_engine, benchmark_ticker, start_date):
+    """Cached wrapper for get_benchmark_history to prevent repeated yfinance calls."""
+    return _engine.get_benchmark_history(benchmark_ticker, start_date=start_date)
 
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes (dividends change less frequently)
@@ -402,6 +402,61 @@ def calculate_risk_metrics(history_df, risk_free_rate=0.0):
         'best_day': daily_returns.max(),
         'worst_day': daily_returns.min(),
     }
+
+
+def calculate_beta_and_corr(portfolio_series, benchmark_series):
+    """Calculate beta and correlation between portfolio and benchmark returns."""
+    if portfolio_series is None or benchmark_series is None:
+        return None, None
+
+    aligned = pd.concat(
+        [portfolio_series.rename('portfolio'), benchmark_series.rename('benchmark')],
+        axis=1
+    ).dropna()
+
+    if len(aligned) < 3:
+        return None, None
+
+    returns = aligned.pct_change().dropna()
+    if returns.empty:
+        return None, None
+
+    cov = returns['portfolio'].cov(returns['benchmark'])
+    var = returns['benchmark'].var()
+    beta = cov / var if var and var > 0 else None
+    corr = returns['portfolio'].corr(returns['benchmark'])
+
+    return beta, corr
+
+
+def calculate_contribution_data(history_df, start_date):
+    """Compute contribution by asset between start_date and latest."""
+    if history_df is None or history_df.empty:
+        return pd.DataFrame(), None, None
+
+    end_date = history_df.index.max()
+    mask = history_df.index >= start_date
+    if mask.any():
+        start_idx = history_df.index[mask].min()
+    else:
+        start_idx = history_df.index.min()
+
+    start_vals = history_df.loc[start_idx]
+    end_vals = history_df.loc[end_date]
+
+    total_change = end_vals.get('Total', 0) - start_vals.get('Total', 0)
+    delta = (end_vals - start_vals).drop(labels=['Total'], errors='ignore')
+
+    contrib_df = delta.reset_index()
+    contrib_df.columns = ['Ticker', 'Change']
+    if total_change != 0:
+        contrib_df['Contribution %'] = contrib_df['Change'] / total_change * 100
+    else:
+        contrib_df['Contribution %'] = 0.0
+
+    contrib_df = contrib_df.sort_values('Change', ascending=False)
+
+    return contrib_df, start_idx, end_date
 
 
 def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
@@ -556,6 +611,71 @@ def render_overview_tab(engine, valuation_data, history_df, timeframe_returns):
                 yaxis_tickprefix='$'
             )
             st.plotly_chart(fig_pnl, use_container_width=True)
+
+    st.markdown("---")
+
+    st.subheader("Portfolio Breakdown")
+    col_currency, col_concentration = st.columns(2)
+
+    with col_currency:
+        st.markdown("**Currency Exposure**")
+        currency_df = engine.get_currency_exposure(include_cash=True)
+        if not currency_df.empty:
+            fig_currency = px.pie(
+                currency_df,
+                names='Currency',
+                values='Market Value (USD)',
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                hole=0.4
+            )
+            fig_currency.update_layout(
+                height=320,
+                margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=True
+            )
+            st.plotly_chart(fig_currency, use_container_width=True)
+            st.dataframe(
+                currency_df[['Currency', 'Market Value (USD)', 'Weight (%)']].style.format({
+                    'Market Value (USD)': '${:,.2f}',
+                    'Weight (%)': '{:.2f}%'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.caption("Currency exposure unavailable.")
+
+    with col_concentration:
+        st.markdown("**Concentration Risk**")
+        concentration = engine.get_concentration_metrics(top_n=5)
+        if concentration:
+            top = concentration['top_holdings']
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Top 5 Weight", f"{concentration['top_weight']:.2f}%")
+            col2.metric("HHI", f"{concentration['hhi']:.3f}")
+            eff_n = concentration.get('effective_n')
+            col3.metric("Effective N", f"{eff_n:.1f}" if eff_n else "N/A")
+
+            fig_top = px.bar(
+                top.sort_values('Weight (%)'),
+                x='Weight (%)',
+                y='Ticker',
+                orientation='h',
+                text=top['Weight (%)'].map(lambda x: f"{x:.1f}%"),
+                color='Weight (%)',
+                color_continuous_scale='Blues'
+            )
+            fig_top.update_layout(
+                height=320,
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title='Weight (%)',
+                yaxis_title='',
+                showlegend=False
+            )
+            fig_top.update_traces(textposition='outside')
+            st.plotly_chart(fig_top, use_container_width=True)
+        else:
+            st.caption("Concentration metrics unavailable.")
 
 
 def render_holdings_tab(engine, history_df):
@@ -788,91 +908,212 @@ def render_holdings_tab(engine, history_df):
                     st.caption(f"{buy['date'].strftime('%Y-%m-%d')}: {buy['quantity']:,.0f} @ {currency_symbol}{buy['price']:.2f}")
 
 
-def render_analysis_tab(engine, history_df, risk_free_rate):
+def render_transactions_tab(engine):
+    """Render the Transactions tab with filters and summaries."""
+    st.subheader("Transactions")
+
+    if engine.transactions is None or engine.transactions.empty:
+        st.info("No transactions available.")
+        return
+
+    df = engine.transactions.copy()
+    df = df.sort_values('CreateDate', ascending=False)
+
+    min_date = df['CreateDate'].min().date() if pd.notna(df['CreateDate']).any() else pd.Timestamp.now().date()
+    max_date = df['CreateDate'].max().date() if pd.notna(df['CreateDate']).any() else pd.Timestamp.now().date()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        date_range = st.date_input(
+            "Date range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
+        )
+    with col2:
+        tickers = sorted(df['YF_Ticker'].dropna().unique().tolist())
+        ticker_filter = st.multiselect("Ticker", tickers, default=[])
+    with col3:
+        types = sorted(df['TransactionType'].dropna().unique().tolist())
+        type_filter = st.multiselect("Transaction type", types, default=[])
+
+    search_term = st.text_input("Search (symbol / type)")
+
+    filtered = df.copy()
+
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+        filtered = filtered[
+            (filtered['CreateDate'].dt.date >= start_date) &
+            (filtered['CreateDate'].dt.date <= end_date)
+        ]
+
+    if ticker_filter:
+        filtered = filtered[filtered['YF_Ticker'].isin(ticker_filter)]
+
+    if type_filter:
+        filtered = filtered[filtered['TransactionType'].isin(type_filter)]
+
+    if search_term:
+        search_lower = search_term.lower()
+        filtered = filtered[
+            filtered['Symbol'].astype(str).str.lower().str.contains(search_lower) |
+            filtered['TransactionType'].astype(str).str.lower().str.contains(search_lower)
+        ]
+
+    buys = filtered[filtered['TransactionType'].str.lower().str.contains('buy', na=False)]
+    sells = filtered[filtered['TransactionType'].str.lower().str.contains('sell', na=False)]
+    divs = filtered[filtered['TransactionType'].str.lower().str.contains('dividend|distribution', na=False)]
+
+    total_buys = -buys['Amount'].sum() if not buys.empty else 0.0
+    total_sells = sells['Amount'].sum() if not sells.empty else 0.0
+    total_divs = divs['Amount'].sum() if not divs.empty else 0.0
+    net_cash = filtered['Amount'].sum() if not filtered.empty else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Buys", f"${total_buys:,.2f}")
+    m2.metric("Total Sells", f"${total_sells:,.2f}")
+    m3.metric("Dividends", f"${total_divs:,.2f}")
+    m4.metric("Net Cash Flow", f"${net_cash:,.2f}")
+
+    st.caption(f"{len(filtered):,} transactions shown")
+
+    display_cols = [
+        'CreateDate', 'YF_Ticker', 'Symbol', 'TransactionType',
+        'Quantity', 'Price', 'Amount', 'Currency', 'FXRate'
+    ]
+    display_cols = [c for c in display_cols if c in filtered.columns]
+
+    styled = filtered[display_cols].copy()
+    if 'CreateDate' in styled.columns:
+        styled['CreateDate'] = styled['CreateDate'].dt.strftime('%Y-%m-%d')
+
+    st.dataframe(
+        styled.style.format({
+            'Quantity': '{:,.2f}',
+            'Price': '{:,.4f}',
+            'Amount': '${:+,.2f}',
+            'FXRate': '{:,.4f}'
+        }),
+        use_container_width=True,
+        hide_index=True,
+        height=500
+    )
+
+    csv_txn = filtered.to_csv(index=False)
+    st.download_button(
+        "Download transactions (CSV)",
+        csv_txn,
+        file_name="transactions.csv",
+        mime="text/csv"
+    )
+
+
+def render_analysis_tab(engine, history_df, risk_free_rate, benchmark_ticker):
     """Render the Analysis tab."""
     
     # Benchmark Comparison
     st.subheader("Performance vs Benchmark")
-    
-    benchmark = get_cached_benchmark_comparison(engine)
-    
-    if 'error' in benchmark:
-        st.warning(f"Benchmark data unavailable: {benchmark['error']}")
+
+    benchmark_ticker = (benchmark_ticker or 'SPY').upper().strip()
+    timeframe = st.selectbox(
+        "Timeframe",
+        ["1M", "3M", "6M", "1Y", "YTD", "Inception"],
+        index=5,
+        key="benchmark_timeframe"
+    )
+
+    today = pd.Timestamp.now().normalize()
+    if timeframe == "1M":
+        start_dt = today - pd.DateOffset(months=1)
+    elif timeframe == "3M":
+        start_dt = today - pd.DateOffset(months=3)
+    elif timeframe == "6M":
+        start_dt = today - pd.DateOffset(months=6)
+    elif timeframe == "1Y":
+        start_dt = today - pd.DateOffset(years=1)
+    elif timeframe == "YTD":
+        start_dt = pd.Timestamp(f"{today.year}-01-01")
     else:
-        port_ret = as_float(benchmark.get('portfolio_return', 0))
-        sp_ret = as_float(benchmark.get('sp500_return', 0))
-        excess = as_float(benchmark.get('excess_return', 0))
-        
-        col1, col2, col3 = st.columns(3)
-        
-        col1.metric("Portfolio", f"{port_ret:+.2f}%", delta="Since Sep 28", delta_color="off")
-        col2.metric("SPY (S&P 500)", f"{sp_ret:+.2f}%", delta="Since Sep 28", delta_color="off")
-        col3.metric(
-            "Excess Return",
-            f"{excess:+.2f}%",
-            delta="Outperforming" if excess >= 0 else "Underperforming",
-            delta_color="normal" if excess >= 0 else "inverse"
-        )
-    
-    # Benchmark Chart
-    if not history_df.empty:
-        start_dt = engine.INCEPTION_DATE.normalize() if hasattr(engine, "INCEPTION_DATE") else pd.Timestamp('2025-09-28')
-        hist_slice = history_df[history_df.index >= start_dt]
-        spy_hist = get_cached_sp500_history(engine, start_dt)
-        
-        chart_rendered = False
-        
-        if spy_hist is not None and len(spy_hist) > 0 and not hist_slice.empty:
-            if isinstance(spy_hist, pd.DataFrame):
-                spy_hist = spy_hist.iloc[:, 0]
-            
-            common_dates = hist_slice.index.intersection(spy_hist.index)
-            
-            if len(common_dates) > 1:
-                base_date = common_dates[0]
-                port_base = as_float(hist_slice.loc[base_date, 'Total'], default=1.0)
-                sp_base = as_float(spy_hist.loc[base_date], default=1.0)
-                
-                if port_base > 0 and sp_base > 0:
-                    port_ret_series = ((hist_slice.loc[common_dates, 'Total'] / port_base) - 1.0) * 100
-                    spy_ret_series = ((spy_hist.loc[common_dates] / sp_base) - 1.0) * 100
-                    
-                    fig = go.Figure()
-                    
-                    fig.add_trace(go.Scatter(
-                        x=port_ret_series.index,
-                        y=port_ret_series.values,
-                        name='Portfolio',
-                        line=dict(color='#1976d2', width=2),
-                        fill='tozeroy',
-                        fillcolor='rgba(25, 118, 210, 0.08)',
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=spy_ret_series.index,
-                        y=spy_ret_series.values,
-                        name='SPY',
-                        line=dict(color='#757575', width=2, dash='dot'),
-                    ))
-                    
-                    fig.add_hline(y=0, line_dash="dash", line_color="#bdbdbd", opacity=0.5)
-                    
-                    fig.update_layout(
-                        title='Cumulative Return: Portfolio vs SPY',
-                        xaxis_title='',
-                        yaxis_title='Return (%)',
-                        yaxis=dict(ticksuffix='%'),
-                        hovermode='x unified',
-                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-                        margin=dict(l=0, r=0, t=40, b=0),
-                        height=300
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    chart_rendered = True
-        
-        if not chart_rendered:
-            st.info("Benchmark chart unavailable - insufficient data.")
+        start_dt = engine.INCEPTION_DATE.normalize() if hasattr(engine, "INCEPTION_DATE") else history_df.index.min()
+
+    hist_slice = history_df[history_df.index >= start_dt] if history_df is not None else pd.DataFrame()
+    benchmark_hist = get_cached_benchmark_history(engine, benchmark_ticker, start_dt)
+
+    chart_rendered = False
+    if benchmark_hist is not None and len(benchmark_hist) > 0 and not hist_slice.empty:
+        if isinstance(benchmark_hist, pd.DataFrame):
+            benchmark_hist = benchmark_hist.iloc[:, 0]
+
+        common_dates = hist_slice.index.intersection(benchmark_hist.index)
+
+        if len(common_dates) > 1:
+            base_date = common_dates[0]
+            port_base = as_float(hist_slice.loc[base_date, 'Total'], default=1.0)
+            bench_base = as_float(benchmark_hist.loc[base_date], default=1.0)
+
+            if port_base > 0 and bench_base > 0:
+                port_ret_series = ((hist_slice.loc[common_dates, 'Total'] / port_base) - 1.0) * 100
+                bench_ret_series = ((benchmark_hist.loc[common_dates] / bench_base) - 1.0) * 100
+
+                port_ret = float(port_ret_series.iloc[-1])
+                bench_ret = float(bench_ret_series.iloc[-1])
+                excess = port_ret - bench_ret
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Portfolio", f"{port_ret:+.2f}%", delta=timeframe, delta_color="off")
+                col2.metric(f"{benchmark_ticker}", f"{bench_ret:+.2f}%", delta=timeframe, delta_color="off")
+                col3.metric(
+                    "Excess Return",
+                    f"{excess:+.2f}%",
+                    delta="Outperforming" if excess >= 0 else "Underperforming",
+                    delta_color="normal" if excess >= 0 else "inverse"
+                )
+
+                beta, corr = calculate_beta_and_corr(
+                    hist_slice.loc[common_dates, 'Total'],
+                    benchmark_hist.loc[common_dates]
+                )
+                col_beta, col_corr = st.columns(2)
+                col_beta.metric("Beta", f"{beta:.2f}" if beta is not None else "N/A")
+                col_corr.metric("Correlation", f"{corr:.2f}" if corr is not None else "N/A")
+
+                fig = go.Figure()
+
+                fig.add_trace(go.Scatter(
+                    x=port_ret_series.index,
+                    y=port_ret_series.values,
+                    name='Portfolio',
+                    line=dict(color='#1976d2', width=2),
+                    fill='tozeroy',
+                    fillcolor='rgba(25, 118, 210, 0.08)',
+                ))
+
+                fig.add_trace(go.Scatter(
+                    x=bench_ret_series.index,
+                    y=bench_ret_series.values,
+                    name=benchmark_ticker,
+                    line=dict(color='#757575', width=2, dash='dot'),
+                ))
+
+                fig.add_hline(y=0, line_dash="dash", line_color="#bdbdbd", opacity=0.5)
+
+                fig.update_layout(
+                    title=f'Cumulative Return: Portfolio vs {benchmark_ticker}',
+                    xaxis_title='',
+                    yaxis_title='Return (%)',
+                    yaxis=dict(ticksuffix='%'),
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    height=300
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+                chart_rendered = True
+
+    if not chart_rendered:
+        st.info("Benchmark chart unavailable - insufficient data.")
     
     st.markdown("---")
 
@@ -1021,6 +1262,81 @@ def render_analysis_tab(engine, history_df, risk_free_rate):
     else:
         st.info("No significant portfolio movement this week.")
     
+    st.markdown("---")
+
+    # Contribution Analysis
+    st.subheader("Contribution by Asset")
+    contrib_period = st.selectbox(
+        "Contribution period",
+        ["1W", "1M", "3M", "6M", "1Y", "YTD", "Inception"],
+        index=2,
+        key="contrib_period"
+    )
+
+    if contrib_period == "1W":
+        contrib_start = today - pd.Timedelta(days=7)
+    elif contrib_period == "1M":
+        contrib_start = today - pd.DateOffset(months=1)
+    elif contrib_period == "3M":
+        contrib_start = today - pd.DateOffset(months=3)
+    elif contrib_period == "6M":
+        contrib_start = today - pd.DateOffset(months=6)
+    elif contrib_period == "1Y":
+        contrib_start = today - pd.DateOffset(years=1)
+    elif contrib_period == "YTD":
+        contrib_start = pd.Timestamp(f"{today.year}-01-01")
+    else:
+        contrib_start = engine.INCEPTION_DATE.normalize() if hasattr(engine, "INCEPTION_DATE") else history_df.index.min()
+
+    contrib_df, contrib_start_idx, contrib_end = calculate_contribution_data(history_df, contrib_start)
+
+    if not contrib_df.empty:
+        top = contrib_df.reindex(
+            contrib_df['Change'].abs().sort_values(ascending=False).head(12).index
+        )
+
+        colors = ['#2e7d32' if x >= 0 else '#c62828' for x in top['Change']]
+        fig_contrib = go.Figure()
+        fig_contrib.add_trace(go.Bar(
+            x=top['Change'],
+            y=top['Ticker'],
+            orientation='h',
+            marker_color=colors,
+            text=[f"${x:+,.0f}" for x in top['Change']],
+            textposition='outside'
+        ))
+        fig_contrib.update_layout(
+            height=max(320, len(top) * 28),
+            margin=dict(l=0, r=60, t=20, b=10),
+            xaxis_title='Change (USD)',
+            yaxis_title='',
+            showlegend=False
+        )
+        fig_contrib.add_vline(x=0, line_color="#bdbdbd", line_dash="dash", opacity=0.5)
+        st.plotly_chart(fig_contrib, use_container_width=True)
+
+        st.caption(f"From {contrib_start_idx.strftime('%Y-%m-%d')} to {contrib_end.strftime('%Y-%m-%d')}")
+
+        contrib_display = contrib_df.copy()
+        st.dataframe(
+            contrib_display.style.format({
+                'Change': '${:+,.2f}',
+                'Contribution %': '{:+.2f}%'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        csv_contrib = contrib_df.to_csv(index=False)
+        st.download_button(
+            "Download contribution data (CSV)",
+            csv_contrib,
+            file_name="contribution_analysis.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("Contribution analysis unavailable - insufficient history.")
+
     st.markdown("---")
     
     # Asset Drill-Down
@@ -1333,6 +1649,17 @@ def main():
             step=0.25
         )
 
+        st.markdown("### Benchmark")
+        benchmark_choice = st.selectbox(
+            "Benchmark ticker",
+            ["SPY", "QQQ", "VTI", "IWM", "Custom"],
+            index=0
+        )
+        if benchmark_choice == "Custom":
+            benchmark_ticker = st.text_input("Custom benchmark", value="SPY")
+        else:
+            benchmark_ticker = benchmark_choice
+
         if st.button("Clear cache & reload"):
             try:
                 st.cache_data.clear()
@@ -1364,6 +1691,7 @@ def main():
         open_name = os.path.basename(default_open) if open_path else "None"
 
     risk_free_rate = risk_free_rate_pct / 100
+    benchmark_ticker = (benchmark_ticker or "SPY").strip().upper()
 
     if not txn_path or not os.path.exists(txn_path):
         st.error("Transaction CSV not found. Please upload a file or verify the default path.")
@@ -1381,6 +1709,12 @@ def main():
     valuation_data = engine.get_valuations()
     history_df = get_cached_history(engine)
     timeframe_returns = get_cached_timeframe_returns(engine)
+    missing_prices = []
+    if getattr(engine, 'market_data', None) is not None and not engine.market_data.empty:
+        try:
+            missing_prices = engine.market_data[engine.market_data['Price'] <= 0].index.tolist()
+        except Exception:
+            missing_prices = []
 
     with st.sidebar:
         st.markdown("### Data status")
@@ -1398,14 +1732,31 @@ def main():
 
         with st.expander("FX rates used"):
             st.write(engine.fx_rates)
+
+        with st.expander("Data health"):
+            warnings = getattr(engine, 'warnings', [])
+            if warnings:
+                st.warning("\n".join(warnings))
+            else:
+                st.caption("No data warnings detected.")
+
+            if missing_prices:
+                st.error(f"Missing prices for: {', '.join(missing_prices)}")
+            else:
+                st.caption("All tickers have price data.")
     
-    tab_overview, tab_holdings, tab_summary, tab_dividends, tab_analysis = st.tabs(["Overview", "Holdings", "Summary", "Dividends", "Analysis"])
+    tab_overview, tab_holdings, tab_transactions, tab_summary, tab_dividends, tab_analysis = st.tabs(
+        ["Overview", "Holdings", "Transactions", "Summary", "Dividends", "Analysis"]
+    )
     
     with tab_overview:
         render_overview_tab(engine, valuation_data, history_df, timeframe_returns)
     
     with tab_holdings:
         render_holdings_tab(engine, history_df)
+
+    with tab_transactions:
+        render_transactions_tab(engine)
     
     with tab_summary:
         render_summary_tab()
@@ -1414,7 +1765,7 @@ def main():
         render_dividends_tab(engine)
     
     with tab_analysis:
-        render_analysis_tab(engine, history_df, risk_free_rate)
+        render_analysis_tab(engine, history_df, risk_free_rate, benchmark_ticker)
     
     # Footer
     st.markdown("---")
