@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import re
 import os
+import math
 
 class PortfolioEngine:
     # Constants
@@ -53,6 +54,33 @@ class PortfolioEngine:
             except ValueError:
                 return 0.0
         return 0.0
+
+    def _min_return_base_value(self, current_value=None):
+        """Return the minimum baseline value used for stable percent calculations."""
+        floor = max(100.0, float(self.INITIAL_CAPITAL) * 0.001)
+        try:
+            if current_value is not None and pd.notna(current_value):
+                floor = max(floor, abs(float(current_value)) * 0.001)
+        except Exception:
+            pass
+        return floor
+
+    def _safe_percent_change(self, start_value, end_value, base_floor=None):
+        """Calculate percent change while avoiding extreme values from tiny denominators."""
+        try:
+            start = float(start_value)
+            end = float(end_value)
+        except Exception:
+            return 0.0
+
+        if base_floor is None:
+            base_floor = self._min_return_base_value(end)
+
+        if not math.isfinite(start) or not math.isfinite(end):
+            return 0.0
+        if abs(start) < float(base_floor):
+            return 0.0
+        return ((end / start) - 1.0) * 100.0
 
     def get_yf_ticker(self, row):
         """Maps CSV symbol/exchange to Yahoo Finance ticker."""
@@ -818,19 +846,25 @@ class PortfolioEngine:
         }
         
         results = {}
+        base_floor = self._min_return_base_value(net_current)
         for label, start_dt in timeframes.items():
             # Find closest available date
             mask = history.index >= start_dt
             if mask.any():
-                start_idx = history.index[mask].min()
-                start_value = history.loc[start_idx, 'Total']
+                candidates = history.loc[mask, 'Total']
+                valid_candidates = candidates[candidates.abs() >= base_floor]
+                if valid_candidates.empty:
+                    continue
+
+                start_idx = valid_candidates.index.min()
+                start_value = float(valid_candidates.loc[start_idx])
                 
                 # For inception, use initial capital
                 if label == 'Inception':
                     start_value = self.INITIAL_CAPITAL
                 
                 abs_return = net_current - start_value
-                pct_return = ((net_current / start_value) - 1) * 100 if start_value > 0 else 0
+                pct_return = self._safe_percent_change(start_value, net_current, base_floor=base_floor)
                 
                 results[label] = {
                     'start_value': start_value,
@@ -865,8 +899,9 @@ class PortfolioEngine:
         start_dt = self.INCEPTION_DATE.normalize()
         hist_slice = history[history.index >= start_dt]
         sp_slice = benchmark[benchmark.index >= start_dt]
-
-        common_dates = hist_slice.index.intersection(sp_slice.index)
+        base_floor = self._min_return_base_value(hist_slice['Total'].iloc[-1] if not hist_slice.empty else None)
+        valid_hist_dates = hist_slice[hist_slice['Total'].abs() >= base_floor].index
+        common_dates = valid_hist_dates.intersection(sp_slice.index)
         if len(common_dates) < 2:
             return {'error': 'Insufficient overlapping dates for comparison'}
 
@@ -875,11 +910,11 @@ class PortfolioEngine:
 
         port_start = float(hist_slice.loc[start_date, 'Total'])
         port_end = float(hist_slice.loc[end_date, 'Total'])
-        port_return = ((port_end / port_start) - 1) * 100 if port_start else 0.0
+        port_return = self._safe_percent_change(port_start, port_end, base_floor=base_floor)
 
         sp_start = float(sp_slice.loc[start_date])
         sp_end = float(sp_slice.loc[end_date])
-        sp_return = ((sp_end / sp_start) - 1) * 100 if sp_start else 0.0
+        sp_return = self._safe_percent_change(sp_start, sp_end, base_floor=1e-9)
 
         excess_return = port_return - sp_return
 
