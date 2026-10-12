@@ -7,6 +7,7 @@ import numpy as np
 import os
 import hashlib
 import tempfile
+import math
 from dotenv import load_dotenv
 from portfolio_engine import PortfolioEngine
 
@@ -87,6 +88,30 @@ def as_float(x, default=0.0):
         return float(x)
     except Exception:
         return float(default)
+
+
+def min_return_base_value(current_value):
+    """Minimum baseline to keep return percentages stable."""
+    try:
+        current = abs(float(current_value))
+    except Exception:
+        current = 0.0
+    return max(100.0, current * 0.001)
+
+
+def safe_percent_change(start_value, end_value, base_floor):
+    """Percent change with denominator guards."""
+    try:
+        start = float(start_value)
+        end = float(end_value)
+    except Exception:
+        return 0.0
+
+    if not math.isfinite(start) or not math.isfinite(end):
+        return 0.0
+    if abs(start) < float(base_floor):
+        return 0.0
+    return ((end / start) - 1.0) * 100.0
 
 
 def _robust_symmetric_range(values, fallback=1.0, q=0.95):
@@ -1048,6 +1073,13 @@ def render_analysis_tab(engine, history_df, risk_free_rate, benchmark_ticker):
         common_dates = hist_slice.index.intersection(benchmark_hist.index)
 
         if len(common_dates) > 1:
+            base_floor = min_return_base_value(hist_slice['Total'].iloc[-1])
+            common_dates = [
+                dt for dt in common_dates
+                if abs(as_float(hist_slice.loc[dt, 'Total'], default=0.0)) >= base_floor
+            ]
+
+        if len(common_dates) > 1:
             base_date = common_dates[0]
             port_base = as_float(hist_slice.loc[base_date, 'Total'], default=1.0)
             bench_base = as_float(benchmark_hist.loc[base_date], default=1.0)
@@ -1056,8 +1088,8 @@ def render_analysis_tab(engine, history_df, risk_free_rate, benchmark_ticker):
                 port_ret_series = ((hist_slice.loc[common_dates, 'Total'] / port_base) - 1.0) * 100
                 bench_ret_series = ((benchmark_hist.loc[common_dates] / bench_base) - 1.0) * 100
 
-                port_ret = float(port_ret_series.iloc[-1])
-                bench_ret = float(bench_ret_series.iloc[-1])
+                port_ret = safe_percent_change(port_base, as_float(hist_slice.loc[common_dates[-1], 'Total']), base_floor)
+                bench_ret = safe_percent_change(bench_base, as_float(benchmark_hist.loc[common_dates[-1]]), 1e-9)
                 excess = port_ret - bench_ret
 
                 col1, col2, col3 = st.columns(3)
